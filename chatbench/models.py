@@ -45,7 +45,7 @@ def new_conversation() -> dict:
                        "min_minutes": 5, "max_minutes": 30, "type_intervals": {},
                        "mode": "mixed", "preset": "正常回复"},
         "messages": [new_message("buyer" if i % 2 == 0 else "seller") for i in range(10)],
-        "render_settings": {"width": 420}, "created_at": created, "updated_at": created,
+        "render_settings": {"width": 420, "style": "classic"}, "created_at": created, "updated_at": created,
     }
     normalize_positions(data)
     return data
@@ -57,6 +57,16 @@ def validate_conversation(data: dict) -> dict:
     for field in ("conversation_id", "title", "country", "language", "timezone", "conversation_date", "participants", "product", "keywords", "time_rules", "messages"):
         if field not in data:
             raise ValueError(f"聊天数据缺少字段：{field}")
+    settings = data.get("render_settings", {})
+    if settings.get("style", "classic") not in ("classic", "wechat", "web"):
+        raise ValueError("不支持的聊天界面样式。")
+    if settings.get("tone", "warm") not in ("warm", "neutral"):
+        raise ValueError("不支持的聊天色调。")
+    pi = data.get("pi")
+    if pi is not None and (not isinstance(pi, dict) or not isinstance(pi.get("fields"), dict)
+                           or any(not isinstance(key, str) or not isinstance(value, str)
+                                  for key, value in pi["fields"].items())):
+        raise ValueError("PI 确认字段格式无效。")
     try:
         ZoneInfo(data["timezone"])
         date.fromisoformat(data["conversation_date"])

@@ -10,7 +10,8 @@ from zoneinfo import ZoneInfo
 import streamlit as st
 
 from chatbench.exporter import export_png, export_zip, safe_filename
-from chatbench.generator import clone_for_batch, generate_ai, offline_sample, regenerate_one
+from chatbench.generator import clone_for_batch, generate_ai, offline_sample, pi_discussion, regenerate_one
+from chatbench.pi_reader import FIELD_LABELS, extract_pi
 from chatbench.models import keyword_warnings, new_conversation, new_message, normalize_positions, validate_conversation
 from chatbench.renderer import render_html
 from chatbench.storage import Store
@@ -72,9 +73,9 @@ def preview(chat: dict, *, height: int | None = None) -> None:
 
 
 st.title("模拟聊天工作台")
-st.caption("所有人物、消息与时间均为模拟内容；预览和导出固定显示模拟标识。")
+st.caption("所有人物、消息与时间均为模拟内容；导出图片不显示模拟标识，请仅用于培训与演示。")
 page = st.sidebar.radio("工作区", ["单组聊天与编辑", "批量生成", "历史与模板"], key="page")
-st.sidebar.caption("本地数据：D:\\WhatsAPP\\data")
+st.sidebar.caption(f"本地数据：{store.root}")
 
 if page == "单组聊天与编辑":
     left, right = st.columns([1.08, 1], gap="large")
@@ -93,6 +94,17 @@ if page == "单组聊天与编辑":
                 st.rerun()
         data["tone"] = c2.text_input("语气", data["tone"], key=f"{revision}-tone")
         data["goal"] = st.text_input("对话目标", data["goal"], key=f"{revision}-goal")
+        render_settings = data.setdefault("render_settings", {})
+        current_style = render_settings.get("style", "classic")
+        render_settings["style"] = st.selectbox("对话界面样式", ["classic", "wechat", "web"],
+            index=["classic", "wechat", "web"].index(current_style),
+            format_func=lambda value: {"classic": "原有样式", "wechat": "微信风格", "web": "宽屏聊天风格"}[value],
+            key=f"{revision}-render-style")
+        if render_settings["style"] == "web":
+            render_settings["tone"] = st.selectbox("宽屏色调", ["warm", "neutral"],
+                index=["warm", "neutral"].index(render_settings.get("tone", "warm")),
+                format_func=lambda value: {"warm": "柔和暖色", "neutral": "清爽中性"}[value],
+                key=f"{revision}-render-tone")
         data["allow_details"] = st.checkbox("允许 AI 补充合理细节", data["allow_details"], key=f"{revision}-details")
         for person_id, heading in (("buyer", "买家"), ("seller", "卖家")):
             with st.expander(f"{heading}资料", expanded=False):
@@ -121,6 +133,32 @@ if page == "单组聊天与编辑":
         upload_widget("上传产品图片（可逐张添加）", "product-image", lambda asset: product["image_ids"].append(asset))
         if product["image_ids"]:
             st.caption(f"已保存 {len(product['image_ids'])} 张产品图片，可在具体消息中插入。")
+        st.subheader("PI 内容识别（形式发票）")
+        st.caption("仅在本机提取可复制文字 PDF；提取值是待核对内容。原始 PDF 不保存到聊天记录。")
+        pi_upload = st.file_uploader("上传 PI PDF", type=["pdf"], key=f"{revision}-pi-pdf")
+        if pi_upload and st.button("提取 PI 文字", key=f"{revision}-pi-extract"):
+            try:
+                fields, raw_text, page_count = extract_pi(pi_upload.getvalue())
+                st.session_state.pi_candidate = {"fields": fields, "raw_text": raw_text, "pages": page_count,
+                                                 "digest": hashlib.sha256(pi_upload.getvalue()).hexdigest()[:16]}
+                st.session_state.pi_candidate_id = data["conversation_id"]
+            except Exception as exc:
+                alert_error(exc)
+        candidate = st.session_state.get("pi_candidate") if st.session_state.get("pi_candidate_id") == data["conversation_id"] else None
+        if candidate:
+            st.info(f"已提取 {candidate['pages']} 页。请逐项核对；空白字段可手动填写，错误字段请修改。")
+            with st.expander("查看原始提取文字（用于核对）"):
+                st.text_area("PDF 提取文字", candidate["raw_text"], height=220, disabled=True)
+            reviewed = {}
+            for field, label in FIELD_LABELS.items():
+                reviewed[field] = st.text_input(label, candidate["fields"].get(field, ""), key=f"pi-review-{data['conversation_id']}-{candidate['digest']}-{field}")
+            if st.button("确认以上 PI 字段用于模拟讨论"):
+                data["pi"] = {"fields": {key: value.strip() for key, value in reviewed.items() if value.strip()}}
+                st.success("PI 字段已确认。保存聊天时会保留这些字段，不保存原始 PDF。")
+        if data.get("pi", {}).get("fields"):
+            st.caption(f"当前聊天已确认 {len(data['pi']['fields'])} 项 PI 字段；可选择“PI 商务讨论”生成。")
+            if data["language"] not in ("中文", "英语"):
+                st.caption("PI 离线讨论目前提供中文和英语模板；当前语言将使用英语模板，生成后可逐条编辑。")
         st.subheader("时间规则")
         rules = data["time_rules"]
         rules.setdefault("end_day_offset", 0)
@@ -166,12 +204,16 @@ if page == "单组聊天与编辑":
                 alert_error(exc)
         st.subheader("创建对话")
         count = st.number_input("消息数量", min_value=1, max_value=100, value=len(data["messages"]), key=f"{revision}-count")
-        mode = st.radio("生成方式", ["完全手动", "离线示例", "AI 生成"], horizontal=True, key=f"{revision}-generation")
-        if st.button("创建/重新生成整组", type="primary"):
+        mode = st.radio("生成方式", ["完全手动", "离线示例", "PI 商务讨论", "AI 生成"],
+                        index=1, horizontal=True, key="generation_mode")
+        create_label = "创建空白消息" if mode == "完全手动" else "创建/重新生成整组"
+        if st.button(create_label, type="primary"):
             try:
                 draft = copy.deepcopy(data)
                 if mode == "AI 生成":
                     generate_ai(draft, int(count))
+                elif mode == "PI 商务讨论":
+                    pi_discussion(draft, int(count))
                 elif mode == "离线示例":
                     offline_sample(draft, int(count))
                 else:
@@ -182,7 +224,7 @@ if page == "单组聊天与编辑":
                 st.rerun()
             except Exception as exc:
                 alert_error(exc)
-        st.caption("整组重新生成会替换当前消息；建议先保存当前版本。AI 功能需另行配置密钥。")
+        st.caption("完全手动只创建空白消息；离线示例会填入演示文字。整组重新生成会替换当前消息，建议先保存当前版本。AI 功能需另行配置密钥。")
     try:
         display_zone = ZoneInfo(data["timezone"])
     except Exception:
@@ -222,6 +264,7 @@ if page == "单组聊天与编辑":
                 alert_error(exc)
         if st.session_state.get("png") and st.session_state.get("png_fingerprint") == fingerprint(data):
             st.download_button("下载高清 PNG", st.session_state.png, file_name=st.session_state.png_name, mime="image/png")
+    wide_preview_slot = st.empty() if data.get("render_settings", {}).get("style") == "web" else None
     st.divider()
     st.subheader("消息编辑器与时间轴")
     st.caption("调整顺序保留原时间；时间冲突由提醒指出。每条人工时间和锁定消息不会被自动重算覆盖。")
@@ -288,7 +331,18 @@ if page == "单组聊天与编辑":
                 except Exception as exc:
                     alert_error(exc)
     with preview_slot.container():
-        preview(data)
+        filled_count = sum(bool(str(msg.get("text") or "").strip()) for msg in data["messages"])
+        st.caption(f"当前 {len(data['messages'])} 条消息，其中 {filled_count} 条有文字。")
+        if not filled_count:
+            st.info("当前都是空白消息。请选择“离线示例”并点击“创建/重新生成整组”，或在下方消息编辑器手动填写。")
+        if wide_preview_slot is None:
+            preview(data)
+        else:
+            st.caption("宽屏完整预览显示在编辑区上方。")
+    if wide_preview_slot is not None:
+        with wide_preview_slot.container():
+            st.subheader("宽屏完整预览")
+            preview(data, height=800)
     with warnings_slot.container():
         try:
             for warning in keyword_warnings(data) + timeline_warnings(data):

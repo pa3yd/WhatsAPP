@@ -4,6 +4,7 @@ import json
 import os
 
 from .models import new_message, normalize_positions, uid
+from .pi_reader import FIELD_LABELS
 from .time_engine import assign_times
 
 LANGUAGE_SAMPLES = {
@@ -23,6 +24,36 @@ def offline_sample(data: dict, count: int) -> dict:
         msg = new_message("buyer" if i % 2 == 0 else "seller", lines[i % len(lines)])
         msg["source"] = "offline_sample"
         data["messages"].append(msg)
+    normalize_positions(data)
+    assign_times(data)
+    return data
+
+
+def pi_discussion(data: dict, count: int) -> dict:
+    """Draft questions around user-confirmed PI fields without inventing terms."""
+    fields = data.get("pi", {}).get("fields", {})
+    if not fields or not any(str(value).strip() for value in fields.values()):
+        raise ValueError("请先上传 PI、核对字段并确认，再生成 PI 讨论。")
+    chinese = data["language"] == "中文"
+    priority = ("product", "total", "payment", "delivery", "incoterm", "quantity",
+                "unit_price", "currency", "shipping", "number", "date", "seller", "buyer")
+    facts = [(FIELD_LABELS[key], str(fields[key]).strip()) for key in priority if str(fields.get(key, "")).strip()]
+    lines = [
+        ("您好，我们想核对这份形式发票的条款。" if chinese else "Hello, we would like to review the terms in this proforma invoice."),
+        ("好的，我们逐项核对；以下仅是模拟讨论，最终以人工确认的文件为准。" if chinese else "Of course. Let's review each item; this is a simulated discussion and the final document needs human confirmation."),
+    ]
+    for label, value in facts:
+        lines.append((f"我看到{label}写的是“{value}”，请确认是否准确。" if chinese else f"I see {label}: {value}. Could you confirm that this is correct?"))
+        lines.append((f"我会核对{label}，确认后再正式回复。" if chinese else f"I will verify {label} before giving a formal reply."))
+    lines.extend([
+        "还有哪些条款需要进一步确认？" if chinese else "Are there any other terms we should clarify?",
+        "我们会整理待确认事项，不将模拟对话作为正式承诺。" if chinese else "We will list the open points; this simulated chat is not a formal commitment.",
+    ])
+    data["messages"] = []
+    for index in range(count):
+        message = new_message("buyer" if index % 2 == 0 else "seller", lines[index % len(lines)])
+        message["source"] = "pi_offline_sample"
+        data["messages"].append(message)
     normalize_positions(data)
     assign_times(data)
     return data

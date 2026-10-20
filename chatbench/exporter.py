@@ -8,7 +8,7 @@ from playwright.sync_api import sync_playwright
 from playwright.sync_api import Error as PlaywrightError
 
 from .models import validate_conversation
-from .renderer import render_html
+from .renderer import render_html, render_width
 from .storage import Store
 
 
@@ -22,7 +22,7 @@ def export_png(data: dict, store: Store, *, scale: int = 3) -> bytes:
     if scale not in (1, 2, 3):
         raise ValueError("PNG 清晰度仅支持 1–3 倍。")
     html = render_html(data, store)
-    width = max(420, min(1000, int(data.get("render_settings", {}).get("width", 620))))
+    width = render_width(data)
     with sync_playwright() as playwright:
         try:
             browser = playwright.chromium.launch(headless=True)

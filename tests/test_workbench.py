@@ -6,12 +6,15 @@ from pathlib import Path
 
 import pytest
 from PIL import Image
+from pypdf import PdfWriter
+from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
 from chatbench.exporter import export_png, export_zip
 from chatbench import generator
-from chatbench.generator import clone_for_batch, offline_sample
+from chatbench.generator import clone_for_batch, offline_sample, pi_discussion
 from chatbench.models import keyword_warnings, new_conversation, validate_conversation
-from chatbench.renderer import LABEL, render_html
+from chatbench.pi_reader import extract_pi
+from chatbench.renderer import render_html
 from chatbench.storage import Store
 from chatbench.time_engine import assign_times, parse_manual, timeline_warnings
 
@@ -80,8 +83,67 @@ def test_image_roundtrip_and_render(tmp_path):
     loaded = store.load(saved["conversation_id"])
     assert loaded["messages"][3]["asset_id"] == asset
     html = render_html(loaded, store)
-    assert LABEL in html and "data:image/png;base64," in html and "Photo de démonstration" in html
+    assert "data:image/png;base64," in html and "Photo de démonstration" in html
+    assert "虚构人物与场景" not in html and "SIMULATED CHAT" not in html
     assert len(store.save(loaded, new_version=True)["conversation_id"]) == 32
+
+
+def test_wechat_style_roundtrip_and_export(tmp_path):
+    store = Store(tmp_path)
+    chat = offline_sample(new_conversation(), 4)
+    chat["render_settings"]["style"] = "wechat"
+    loaded = store.load(store.save(chat)["conversation_id"])
+    html = render_html(loaded, store)
+    assert 'body class="wechat warm"' in html
+    assert 'class="message-avatar placeholder"' in html
+    assert "虚构人物与场景" not in html and "SIMULATED CHAT" not in html
+    png = export_png(loaded, store)
+    assert png.startswith(b"\x89PNG")
+    assert 'body class="classic warm"' in render_html(new_conversation(), store)
+
+
+def test_wide_chat_tones_export_and_keep_simulated_label(tmp_path):
+    store = Store(tmp_path)
+    chat = offline_sample(new_conversation(), 4)
+    chat["render_settings"]["style"] = "web"
+    for tone in ("warm", "neutral"):
+        chat["render_settings"]["tone"] = tone
+        html = render_html(chat, store)
+        assert f'body class="web {tone}"' in html
+        assert "SIMULATED CHAT" not in html and 'class="composer"' in html
+        png = export_png(chat, store, scale=1)
+        with Image.open(io.BytesIO(png)) as image:
+            assert image.width == 1000
+
+
+def test_pi_text_pdf_review_and_offline_discussion(tmp_path):
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=595, height=842)
+    font = DictionaryObject({NameObject("/Type"): NameObject("/Font"),
+                             NameObject("/Subtype"): NameObject("/Type1"),
+                             NameObject("/BaseFont"): NameObject("/Helvetica")})
+    page[NameObject("/Resources")] = DictionaryObject({NameObject("/Font"): DictionaryObject({NameObject("/F1"): writer._add_object(font)})})
+    stream = DecodedStreamObject()
+    stream.set_data(b"BT /F1 12 Tf 50 700 Td (PI No: PI-123) Tj 0 -20 Td (Grand Total: USD 1200) Tj ET")
+    page[NameObject("/Contents")] = writer._add_object(stream)
+    buffer = io.BytesIO(); writer.write(buffer)
+    fields, raw_text, pages = extract_pi(buffer.getvalue())
+    assert pages == 1 and fields["number"] == "PI-123" and fields["total"] == "USD 1200"
+    chat = new_conversation(); chat["language"] = "中文"
+    chat["pi"] = {"fields": {"number": fields["number"], "total": fields["total"]}}
+    pi_discussion(chat, 6)
+    assert "USD 1200" in chat["messages"][2]["text"]
+    assert "PI-123" in chat["messages"][4]["text"]
+    loaded = Store(tmp_path).load(Store(tmp_path).save(chat)["conversation_id"])
+    assert loaded["pi"] == chat["pi"] and "raw_text" not in loaded["pi"]
+    assert raw_text.startswith("PI No")
+
+
+def test_pi_scanned_pdf_requires_text():
+    writer = PdfWriter(); writer.add_blank_page(width=595, height=842)
+    buffer = io.BytesIO(); writer.write(buffer)
+    with pytest.raises(ValueError, match="没有可复制文字"):
+        extract_pi(buffer.getvalue())
 
 
 def test_batch_failure_does_not_erase_success(tmp_path):
@@ -130,6 +192,20 @@ def test_streamlit_save_and_fresh_session_load(tmp_path, monkeypatch):
     next(button for button in fresh.button if button.label == "载入").click().run()
     assert not fresh.exception
     assert fresh.session_state["chat"]["messages"][0]["text"] == "Bonjour, essai sauvegardé"
+
+
+def test_generation_mode_stays_selected_and_populates_preview(tmp_path, monkeypatch):
+    from streamlit.testing.v1 import AppTest
+
+    monkeypatch.chdir(tmp_path)
+    app_path = Path(__file__).resolve().parents[1] / "app.py"
+    app = AppTest.from_file(str(app_path), default_timeout=30).run()
+    mode = next(radio for radio in app.radio if radio.label == "生成方式")
+    assert mode.value == "离线示例"
+    next(button for button in app.button if button.label == "创建/重新生成整组").click().run()
+    assert not app.exception
+    assert app.session_state["generation_mode"] == "离线示例"
+    assert all(message["text"] for message in app.session_state["chat"]["messages"])
 
 
 def test_ai_gate_and_single_message_preservation(monkeypatch):
