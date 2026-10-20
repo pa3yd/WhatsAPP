@@ -9,17 +9,76 @@ from zoneinfo import ZoneInfo
 
 import streamlit as st
 
-from chatbench.exporter import export_png, export_zip, safe_filename
+from chatbench.exporter import export_png, export_zip, safe_filename, screenshot_html
 from chatbench.generator import clone_for_batch, generate_ai, offline_sample, pi_discussion, regenerate_one
+from chatbench.mail import MAIL_WIDTH, MAX_MAIL_MESSAGES, new_mail_message, new_mail_record, render_mail_html, validate_mail
+from chatbench.invoice_ui import render_invoice_page
 from chatbench.pi_reader import FIELD_LABELS, extract_pi
 from chatbench.models import keyword_warnings, new_conversation, new_message, normalize_positions, validate_conversation
-from chatbench.renderer import render_html
+from chatbench.renderer import render_header_preview_html, render_html
 from chatbench.storage import Store
 from chatbench.time_engine import assign_times, parse_manual, timeline_warnings
 
 st.set_page_config(page_title="模拟聊天工作台", page_icon="💬", layout="wide")
-st.markdown("""<style>.block-container{padding-top:1.3rem}.stButton button{border-radius:8px}.small-note{color:#617478;font-size:.85rem}</style>""", unsafe_allow_html=True)
+st.markdown("""<style>
+:root {
+  --surface: #ffffff;
+  --canvas: #f4f7f6;
+  --ink: #233634;
+  --muted: #71817e;
+  --line: #e3eae7;
+  --brand: #24756d;
+  --brand-dark: #195e58;
+}
+.stApp { background: var(--canvas); color: var(--ink); }
+[data-testid="stHeader"] { background: transparent; }
+.block-container { max-width: 1500px; padding-top: 1.8rem; padding-bottom: 3rem; }
+h1, h2, h3 { color: var(--ink); letter-spacing: -.02em; }
+h1 { font-size: 2rem !important; font-weight: 700 !important; margin-bottom: .2rem !important; }
+h2 { font-size: 1.35rem !important; font-weight: 650 !important; }
+h3 { font-size: 1.05rem !important; font-weight: 650 !important; }
+.block-container > div > div > div > div[data-testid="stCaptionContainer"] { color: var(--muted); }
+[data-testid="stSidebar"] { background: #edf3f1; border-right: 1px solid var(--line); }
+[data-testid="stSidebar"] > div { padding-top: 1.25rem; }
+[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p { color: var(--muted); }
+[data-testid="stRadio"] [role="radiogroup"] { gap: .4rem; }
+[data-testid="stRadio"] [role="radiogroup"] label {
+  border: 1px solid transparent; border-radius: 9px; padding: .45rem .65rem;
+  transition: background .15s ease, border-color .15s ease;
+}
+[data-testid="stRadio"] [role="radiogroup"] label:hover { background: #e2eeea; border-color: #d2e3de; }
+[data-testid="stRadio"] [role="radiogroup"] label:has(input:checked) { background: #dcece7; border-color: #c7ded6; }
+[data-baseweb="input"] > div, [data-baseweb="textarea"] > div, [data-baseweb="select"] > div {
+  border-color: #d7e1dd; border-radius: 8px; background: var(--surface);
+}
+[data-baseweb="input"] > div:focus-within, [data-baseweb="textarea"] > div:focus-within,
+[data-baseweb="select"] > div:focus-within { border-color: var(--brand); box-shadow: 0 0 0 1px var(--brand); }
+.stButton button, .stDownloadButton button { border-radius: 8px; font-weight: 600; transition: all .15s ease; }
+.stButton button[kind="primary"] { background: var(--brand); border-color: var(--brand); }
+.stButton button[kind="primary"]:hover { background: var(--brand-dark); border-color: var(--brand-dark); }
+.stButton button:not([kind="primary"]), .stDownloadButton button { border-color: #d5e0dc; color: #31534e; background: var(--surface); }
+.stButton button:not([kind="primary"]):hover, .stDownloadButton button:hover { border-color: #9bbdb3; color: var(--brand-dark); }
+[data-testid="stExpander"] { border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+[data-testid="stAlert"] { border-radius: 9px; }
+hr { border-color: var(--line); }
+.small-note { color: var(--muted); font-size: .85rem; }
+@media (max-width: 700px) {
+  .block-container { padding: 1rem 1rem 2rem; }
+  h1 { font-size: 1.65rem !important; }
+}
+</style>""", unsafe_allow_html=True)
 store = Store()
+
+TIMEZONE_CHOICES = {
+    "Asia/Shanghai": "北京时间（Asia/Shanghai）",
+    "Europe/Paris": "巴黎时间（Europe/Paris）",
+    "Europe/Rome": "罗马时间（Europe/Rome）",
+    "Europe/Berlin": "柏林时间（Europe/Berlin）",
+    "Europe/London": "伦敦时间（Europe/London）",
+    "America/New_York": "纽约时间（America/New_York）",
+    "Asia/Dubai": "迪拜时间（Asia/Dubai）",
+    "UTC": "协调世界时（UTC）",
+}
 
 
 def alert_error(exc: Exception) -> None:
@@ -31,6 +90,11 @@ def reset_editor(data: dict) -> None:
     st.session_state.editor_rev = st.session_state.get("editor_rev", 0) + 1
 
 
+def reset_mail(data: dict) -> None:
+    st.session_state.mail = data
+    st.session_state.mail_rev = st.session_state.get("mail_rev", 0) + 1
+
+
 if "chat" not in st.session_state:
     initial = new_conversation()
     assign_times(initial)
@@ -38,6 +102,9 @@ if "chat" not in st.session_state:
     st.session_state.editor_rev = 0
 if "batch" not in st.session_state:
     st.session_state.batch = []
+if "mail" not in st.session_state:
+    st.session_state.mail = new_mail_record()
+    st.session_state.mail_rev = 0
 if "nav_to" in st.session_state:
     st.session_state.page = st.session_state.pop("nav_to")
 
@@ -54,11 +121,23 @@ def comma_list(value: str) -> list[str]:
     return [part.strip() for part in value.replace("\n", ",").split(",") if part.strip()]
 
 
-def upload_widget(label: str, key: str, assign) -> None:
+def upload_widget(label: str, key: str, assign, *, button_label: str = "保存并使用图片") -> None:
     uploaded = st.file_uploader(label, type=["png", "jpg", "jpeg", "webp"], key=f"{revision}-{key}")
-    if uploaded and st.button("保存并使用图片", key=f"save-{revision}-{key}"):
+    if uploaded and st.button(button_label, key=f"save-{revision}-{key}"):
         try:
             assign(store.save_image(uploaded.getvalue()))
+            st.rerun()
+        except Exception as exc:
+            alert_error(exc)
+
+
+def avatar_upload_widget(label: str, person_id: str, chat: dict) -> None:
+    uploaded = st.file_uploader(label, type=["png", "jpg", "jpeg", "webp"],
+                                key=f"{revision}-{person_id}-avatar")
+    if uploaded:
+        try:
+            chat["participants"][person_id]["avatar_id"] = store.save_image(uploaded.getvalue())
+            reset_editor(chat)
             st.rerun()
         except Exception as exc:
             alert_error(exc)
@@ -73,8 +152,8 @@ def preview(chat: dict, *, height: int | None = None) -> None:
 
 
 st.title("模拟聊天工作台")
-st.caption("所有人物、消息与时间均为模拟内容；导出图片不显示模拟标识，请仅用于培训与演示。")
-page = st.sidebar.radio("工作区", ["单组聊天与编辑", "批量生成", "历史与模板"], key="page")
+st.caption("人物、消息、邮件与 PI 均为模拟素材，仅供培训与演示；邮件和 PI 导出带模拟标识，聊天截图不带标识。")
+page = st.sidebar.radio("工作区", ["单组聊天与编辑", "PI 形式发票", "邮件记录截图", "批量生成", "历史与模板"], key="page")
 st.sidebar.caption(f"本地数据：{store.root}")
 
 if page == "单组聊天与编辑":
@@ -85,13 +164,22 @@ if page == "单组聊天与编辑":
         c1, c2 = st.columns(2)
         data["country"] = c1.text_input("国家", data["country"], key=f"{revision}-country")
         data["language"] = c2.text_input("聊天语言", data["language"], key=f"{revision}-language")
-        data["timezone"] = c1.text_input("时区（IANA）", data["timezone"], key=f"{revision}-zone")
-        if data["country"].strip() == "法国" and data["timezone"] != "Europe/Paris":
-            st.warning("法国场景当前使用非 Europe/Paris 时区；这是允许的显式选择。")
-            if st.button("切换为 Europe/Paris"):
-                data["timezone"] = "Europe/Paris"
-                reset_editor(data)
-                st.rerun()
+        zone_options = list(TIMEZONE_CHOICES) + ["自定义"]
+        current_zone = data["timezone"]
+        zone_choice = c1.selectbox("显示与排时所用时区", zone_options,
+                                   index=zone_options.index(current_zone) if current_zone in TIMEZONE_CHOICES else len(zone_options) - 1,
+                                   format_func=lambda value: TIMEZONE_CHOICES.get(value, "自定义 IANA 时区"),
+                                   key=f"{revision}-zone-choice")
+        if zone_choice == "自定义":
+            entered_zone = c1.text_input("自定义 IANA 时区", current_zone, key=f"{revision}-zone-custom").strip()
+            try:
+                ZoneInfo(entered_zone)
+                data["timezone"] = entered_zone
+            except (KeyError, ValueError):
+                c1.error("时区名称无效，请输入例如 Asia/Tokyo。")
+        else:
+            data["timezone"] = zone_choice
+        st.caption("国家与时区可独立设置。更换时区会换算已有消息的显示钟点，不会静默改动其真实时间；新建对话默认北京时间。")
         data["tone"] = c2.text_input("语气", data["tone"], key=f"{revision}-tone")
         data["goal"] = st.text_input("对话目标", data["goal"], key=f"{revision}-goal")
         render_settings = data.setdefault("render_settings", {})
@@ -106,6 +194,57 @@ if page == "单组聊天与编辑":
                 format_func=lambda value: {"warm": "柔和暖色", "neutral": "清爽中性"}[value],
                 key=f"{revision}-render-tone")
         data["allow_details"] = st.checkbox("允许 AI 补充合理细节", data["allow_details"], key=f"{revision}-details")
+        st.subheader("聊天头像")
+        st.caption("选择 PNG、JPG 或 WebP 图片后立即应用。买方头像显示在 WhatsApp 风格聊天顶部；微信风格还会在买卖双方消息旁显示各自头像。")
+        avatar_columns = st.columns(2)
+        for column, person_id, heading in zip(avatar_columns, ("buyer", "seller"), ("买方", "卖方")):
+            person = data["participants"][person_id]
+            with column:
+                st.markdown(f"**{heading}头像**")
+                if person.get("avatar_id"):
+                    try:
+                        st.image(str(store.image_path(person["avatar_id"])), width=80)
+                    except ValueError as exc:
+                        alert_error(exc)
+                    if st.button(f"移除{heading}头像", key=f"{revision}-{person_id}-remove-avatar"):
+                        person["avatar_id"] = None
+                        reset_editor(data)
+                        st.rerun()
+                else:
+                    st.caption("尚未设置，预览时显示姓名首字母。")
+                avatar_upload_widget(f"上传或更换{heading}头像", person_id, data)
+        st.subheader("聊天顶部状态（模拟）")
+        buyer = data["participants"]["buyer"]
+        presence_options = ["hidden", "online", "last_seen"]
+        current_presence = buyer.get("presence_mode", "hidden")
+        buyer["presence_mode"] = st.selectbox(
+            "买方状态", presence_options,
+            index=presence_options.index(current_presence) if current_presence in presence_options else 0,
+            format_func=lambda value: {"hidden": "不显示", "online": "在线", "last_seen": "最后上线时间"}[value],
+            key=f"{revision}-buyer-presence",
+        )
+        if buyer["presence_mode"] == "last_seen":
+            saved_last_seen = buyer.get("last_seen_at")
+            initial_last_seen = (datetime.fromisoformat(saved_last_seen).astimezone(ZoneInfo(data["timezone"]))
+                                 if saved_last_seen else datetime.now(ZoneInfo(data["timezone"])))
+            presence_date, presence_time = st.columns(2)
+            seen_date = presence_date.date_input("最后上线日期", initial_last_seen.date(),
+                                                 key=f"{revision}-{data['timezone']}-last-seen-date")
+            seen_time = presence_time.time_input("最后上线时间", initial_last_seen.time().replace(second=0, microsecond=0),
+                                                 step=60, key=f"{revision}-{data['timezone']}-last-seen-time")
+            try:
+                buyer["last_seen_at"] = parse_manual(seen_date, seen_time, data["timezone"])
+            except ValueError as exc:
+                st.error(str(exc))
+        st.caption("只用于 WhatsApp 风格预览与导出，不读取真实在线状态；“今天/昨天”相对于对话日期显示。")
+        if render_settings["style"] in ("classic", "web"):
+            st.caption("顶部即时预览（右侧完整聊天的顶部也会同步显示）")
+            try:
+                st.iframe(render_header_preview_html(data, store), height=68)
+            except Exception as exc:
+                alert_error(exc)
+        else:
+            st.info("当前选择的是微信风格；最后上线时间仅在 WhatsApp 风格中显示。")
         for person_id, heading in (("buyer", "买家"), ("seller", "卖家")):
             with st.expander(f"{heading}资料", expanded=False):
                 person = data["participants"][person_id]
@@ -114,12 +253,6 @@ if page == "单组聊天与编辑":
                 person["company"] = st.text_input(f"{heading}公司", person["company"], key=f"{revision}-{person_id}-company")
                 person["region"] = st.text_input(f"{heading}国家/地区", person["region"], key=f"{revision}-{person_id}-region")
                 person["style"] = st.text_input(f"{heading}表达风格", person["style"], key=f"{revision}-{person_id}-style")
-                if person.get("avatar_id"):
-                    try:
-                        st.image(str(store.image_path(person["avatar_id"])), width=75)
-                    except ValueError as exc:
-                        alert_error(exc)
-                upload_widget(f"上传{heading}虚构头像", f"{person_id}-avatar", lambda asset, p=person: p.update(avatar_id=asset))
         st.subheader("产品与关键词")
         product = data["product"]
         product["name"] = st.text_input("产品名称", product["name"], key=f"{revision}-product")
@@ -130,6 +263,7 @@ if page == "单组聊天与编辑":
         required = st.text_input("必须出现的关键词（逗号分隔）", ", ".join(data["keywords"]["required"]), key=f"{revision}-required")
         forbidden = st.text_input("禁止出现的关键词（逗号分隔）", ", ".join(data["keywords"]["forbidden"]), key=f"{revision}-forbidden")
         data["keywords"] = {"required": comma_list(required), "forbidden": comma_list(forbidden)}
+        st.caption("关键词会在新生成的离线示例或 AI 草稿中使用；已编辑的消息不会被输入框自动改写。修改后请在下方点击“创建/重新生成整组”，或手动编辑消息。")
         upload_widget("上传产品图片（可逐张添加）", "product-image", lambda asset: product["image_ids"].append(asset))
         if product["image_ids"]:
             st.caption(f"已保存 {len(product['image_ids'])} 张产品图片，可在具体消息中插入。")
@@ -229,7 +363,7 @@ if page == "单组聊天与编辑":
         display_zone = ZoneInfo(data["timezone"])
     except Exception:
         display_zone = ZoneInfo("UTC")
-        st.error("时区无效，请输入 IANA 时区名称，例如 Europe/Rome。")
+        st.error("时区无效，请选择预设时区或输入有效的 IANA 时区名称。")
     with right:
         st.subheader("实时预览")
         preview_slot = st.empty()
@@ -350,11 +484,100 @@ if page == "单组聊天与编辑":
         except Exception as exc:
             alert_error(exc)
 
+elif page == "PI 形式发票":
+    render_invoice_page(store, st.session_state.chat, st.session_state.mail, reset_editor, reset_mail)
+
+elif page == "邮件记录截图":
+    mail = st.session_state.mail
+    mail_revision = st.session_state.mail_rev
+    st.subheader("Gmail 风格模拟邮件记录")
+    st.caption("编辑虚构邮件往来并导出截图。预览与 PNG 都带有“模拟邮件记录”标识；不会连接或发送真实邮件。")
+    if st.button("新建示例邮件", key="mail-new"):
+        reset_mail(new_mail_record())
+        st.rerun()
+    top1, top2 = st.columns([2, 1])
+    mail["subject"] = top1.text_input("邮件主题", mail["subject"], key=f"mail-{mail_revision}-subject")
+    mail["account"] = top2.text_input("邮箱账号（显示用）", mail["account"], key=f"mail-{mail_revision}-account")
+    mail["folder"] = st.selectbox("截图所在文件夹", ["收件箱", "已发送"],
+                                  index=["收件箱", "已发送"].index(mail["folder"]), key=f"mail-{mail_revision}-folder")
+    st.markdown("#### 往来邮件")
+    for index, message in enumerate(mail["messages"]):
+        sender_label = message["sender"].split("<", 1)[0].strip() or "待填写发件人"
+        with st.expander(f"邮件 {index + 1:02d} · {sender_label}", expanded=index == len(mail["messages"]) - 1):
+            key = f"mail-{mail_revision}-{message['id']}"
+            a, b = st.columns(2)
+            message["sender"] = a.text_input("发件人", message["sender"], key=f"{key}-sender")
+            message["recipient"] = b.text_input("收件人", message["recipient"], key=f"{key}-recipient")
+            a, b = st.columns(2)
+            message["cc"] = a.text_input("抄送（可选）", message["cc"], key=f"{key}-cc")
+            message["sent_at"] = b.text_input("发送时间（YYYY-MM-DD HH:MM）", message["sent_at"], key=f"{key}-time")
+            message["body"] = st.text_area("正文", message["body"], height=160, key=f"{key}-body")
+            if st.button("删除此封邮件", key=f"{key}-delete", disabled=len(mail["messages"]) == 1):
+                mail["messages"].pop(index)
+                reset_mail(mail)
+                st.rerun()
+    if st.button("添加一封邮件", disabled=len(mail["messages"]) >= MAX_MAIL_MESSAGES):
+        mail["messages"].append(new_mail_message(sender=f"<{mail['account']}>", recipient="<buyer@example.com>"))
+        reset_mail(mail)
+        st.rerun()
+    st.subheader("实时预览")
+    try:
+        st.iframe(render_mail_html(mail), height=750)
+    except Exception as exc:
+        alert_error(exc)
+    st.subheader("保存与导出")
+    save1, save2, save3 = st.columns(3)
+    if save1.button("保存邮件记录"):
+        try:
+            reset_mail(store.save_mail(mail))
+            st.success("已保存到本地邮件记录。")
+        except Exception as exc:
+            alert_error(exc)
+    if save2.button("另存新版本"):
+        try:
+            reset_mail(store.save_mail(mail, new_version=True))
+            st.success("新版本已保存。")
+        except Exception as exc:
+            alert_error(exc)
+    save3.download_button("下载邮件 JSON", json.dumps(mail, ensure_ascii=False, indent=2).encode("utf-8"),
+                          file_name=f"mail_{mail['mail_id'][:8]}.json", mime="application/json")
+    if st.button("准备邮件 PNG", type="primary"):
+        try:
+            validate_mail(mail)
+            st.session_state.mail_png = screenshot_html(render_mail_html(mail), MAIL_WIDTH)
+            st.session_state.mail_png_fingerprint = fingerprint(mail)
+        except Exception as exc:
+            alert_error(exc)
+    if st.session_state.get("mail_png") and st.session_state.get("mail_png_fingerprint") == fingerprint(mail):
+        st.download_button("下载邮件 PNG", st.session_state.mail_png,
+                           file_name=safe_filename(mail["subject"], mail["mail_id"]), mime="image/png")
+    st.subheader("已保存的邮件记录")
+    for record in store.list_mail_records():
+        rid = record["id"]
+        cols = st.columns([4, 1, 1, 1])
+        cols[0].write(f"{record['title']} · {record['updated_at']} · {rid[:8]}")
+        if cols[1].button("载入", key=f"load-mail-{rid}"):
+            try:
+                reset_mail(store.load_mail(rid))
+                st.rerun()
+            except Exception as exc:
+                alert_error(exc)
+        if cols[2].button("删除", key=f"ask-delete-mail-{rid}"):
+            st.session_state.mail_delete_target = rid
+        if st.session_state.get("mail_delete_target") == rid:
+            if cols[3].button("确认删除", key=f"confirm-delete-mail-{rid}"):
+                try:
+                    store.delete_mail(rid)
+                    st.session_state.mail_delete_target = None
+                    st.rerun()
+                except Exception as exc:
+                    alert_error(exc)
+
 elif page == "批量生成":
     st.subheader("批量任务")
     st.caption("无密钥时批量创建可编辑的多语言离线示例。配置密钥后可逐组使用 AI 生成。")
-    defaults = [{"国家": "法国", "语言": "法语", "时区": "Europe/Rome", "买家": "Camille Martin", "卖家": "Alex Chen", "买家身份": "采购经理", "卖家身份": "销售代表", "产品": "手机充电器", "必需词": "", "禁用词": "", "开始": "09:00", "结束": "16:30", "跨日天数": 0, "最小间隔": 5, "最大间隔": 30, "数量": 10},
-                {"国家": "德国", "语言": "德语", "时区": "Europe/Berlin", "买家": "Lena Weber", "卖家": "Alex Chen", "买家身份": "采购经理", "卖家身份": "销售代表", "产品": "手机充电器", "必需词": "", "禁用词": "", "开始": "09:00", "结束": "16:30", "跨日天数": 0, "最小间隔": 5, "最大间隔": 30, "数量": 10}]
+    defaults = [{"国家": "法国", "语言": "法语", "时区": "Asia/Shanghai", "买家": "Camille Martin", "卖家": "Alex Chen", "买家身份": "采购经理", "卖家身份": "销售代表", "产品": "手机充电器", "必需词": "", "禁用词": "", "开始": "09:00", "结束": "16:30", "跨日天数": 0, "最小间隔": 5, "最大间隔": 30, "数量": 10},
+                {"国家": "德国", "语言": "德语", "时区": "Asia/Shanghai", "买家": "Lena Weber", "卖家": "Alex Chen", "买家身份": "采购经理", "卖家身份": "销售代表", "产品": "手机充电器", "必需词": "", "禁用词": "", "开始": "09:00", "结束": "16:30", "跨日天数": 0, "最小间隔": 5, "最大间隔": 30, "数量": 10}]
     rows = st.data_editor(defaults, num_rows="dynamic", width="stretch", key="batch-config")
     st.caption("各组可上传独立的虚构头像与产品图片；没有上传时沿用单组场景资源。")
     for row_index, row in enumerate(rows):

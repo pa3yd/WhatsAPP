@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 
 from .models import new_message, normalize_positions, uid
 from .pi_reader import FIELD_LABELS
@@ -9,21 +10,51 @@ from .time_engine import assign_times
 
 LANGUAGE_SAMPLES = {
     "法语": ["Bonjour, je cherche un chargeur pour téléphone.", "Bonjour ! Quel type de chargeur vous intéresse ?", "Pouvez-vous préciser les caractéristiques et le délai ?", "Bien sûr. Je peux préparer une fiche produit pour vous.", "Merci. Avez-vous une photo du produit ?", "Oui, je peux partager une image de démonstration.", "Quel est le minimum de commande ?", "Je vais vérifier cette information avant de vous répondre.", "Très bien, merci pour votre aide.", "Avec plaisir, restons en contact."],
-    "英语": ["Hello, I am looking for a phone charger.", "Hello! What specifications do you need?", "Could you share the product details?", "Of course. I can prepare a product sheet.", "Do you have an example image?", "Yes, I can share a demonstration image.", "What is the minimum order quantity?", "I will confirm that before quoting.", "Thank you, that sounds good.", "You're welcome. Let's stay in touch."],
+    "英语": ["Hi, we're reviewing suppliers for {product}. Could you send the current specifications?", "Hi, of course. Which requirements are most important for your team?", "Please include the options, packaging and any available product photos.", "Understood. I'll put the relevant information together for your review.", "Thanks. Could you also confirm the minimum order quantity?", "I'll check the current MOQ before giving you a firm answer.", "And what lead time should we plan for an initial order?", "That depends on the final quantity. I'll verify the schedule and come back to you.", "Sounds good. Please send the confirmed details when ready.", "Will do. After you review them, we can go through the PI terms together."],
     "西班牙语": ["Hola, busco un cargador de teléfono.", "¡Hola! ¿Qué especificaciones necesita?", "¿Puede compartir los detalles del producto?", "Por supuesto, prepararé una ficha del producto.", "¿Tiene una imagen de ejemplo?", "Sí, puedo compartir una imagen de demostración.", "¿Cuál es el pedido mínimo?", "Lo confirmaré antes de ofrecer un precio.", "Gracias, perfecto.", "Con gusto, seguimos en contacto."],
     "德语": ["Guten Tag, ich suche ein Handy-Ladegerät.", "Guten Tag! Welche Anforderungen haben Sie?", "Können Sie die Produktdaten senden?", "Gerne, ich bereite ein Datenblatt vor.", "Haben Sie ein Beispielbild?", "Ja, ich kann ein Demobild teilen.", "Wie hoch ist die Mindestbestellmenge?", "Das prüfe ich vor einem Angebot.", "Vielen Dank.", "Gern geschehen, wir bleiben in Kontakt."],
-    "中文": ["您好，我想了解手机充电器。", "您好，请问您需要什么规格？", "可以提供产品参数吗？", "可以，我会整理产品资料。", "有产品示意图吗？", "有，我可以分享模拟展示图片。", "最小起订量是多少？", "我确认后再给您准确答复。", "谢谢，期待回复。", "好的，保持联系。"],
+    "中文": ["您好，我们正在比较{product}的供应商，方便发一下现有规格资料吗？", "您好，可以。您这边更关注哪些要求？", "请把可选规格、包装方式和产品图片一起发来，我们内部先评估。", "收到，我整理好相关资料给您核对。", "另外，最小起订量是多少？", "这个我先核对当前条件，再给您准确答复。", "首批订单的交期大概怎么安排？", "交期要结合最终数量确认，我核实排期后回复您。", "好的，等您确认后的资料。", "没问题。您看完资料后，我们再逐项讨论 PI 条款。"],
+}
+
+KEYWORD_DIALOGUE = {
+    "中文": ("我们目前也在考虑{keywords}，这些条件是否可行？", "我会核对这些条件，确认后再给您准确答复。"),
+    "英语": ("We're also considering {keywords}. Could you confirm whether these terms are feasible?", "I'll check those points and get back to you with a confirmed answer."),
+    "法语": ("Nous envisageons aussi {keywords}. Pouvez-vous confirmer si ces conditions sont possibles ?", "Je vais vérifier ces points avant de vous répondre précisément."),
+    "西班牙语": ("También estamos considerando {keywords}. ¿Puede confirmar si estas condiciones son posibles?", "Revisaré esos puntos antes de darle una respuesta definitiva."),
+    "德语": ("Wir prüfen auch {keywords}. Können Sie bestätigen, ob diese Bedingungen möglich sind?", "Ich prüfe diese Punkte und melde mich mit einer bestätigten Antwort."),
 }
 
 
 def offline_sample(data: dict, count: int) -> dict:
     """Clearly labeled editable sample, never presented as AI output."""
     lines = LANGUAGE_SAMPLES.get(data["language"], LANGUAGE_SAMPLES["英语"])
-    data["messages"] = []
+    product = str(data.get("product", {}).get("name") or "the product")
+    if data["language"] == "英语" and re.search(r"[\u4e00-\u9fff]", product):
+        product = "this product"
+    required = list(dict.fromkeys(str(word).strip() for word in data["keywords"]["required"] if str(word).strip()))
+    forbidden = [str(word).strip() for word in data["keywords"]["forbidden"] if str(word).strip()]
+    for word in required:
+        if any(blocked.casefold() in word.casefold() for blocked in forbidden):
+            raise ValueError(f"关键词“{word}”与禁止词冲突，请先修改关键词设置。")
+    sample_lines = [line.format(product=product) for line in lines]
+    if required:
+        buyer_prompt, seller_reply = KEYWORD_DIALOGUE.get(data["language"], KEYWORD_DIALOGUE["英语"])
+        keyword_text = ", ".join(required)
+        if count >= 5:
+            sample_lines[4] = buyer_prompt.format(keywords=keyword_text)
+            sample_lines[5] = seller_reply
+        else:
+            sample_lines[0] += " " + buyer_prompt.format(keywords=keyword_text)
+    messages = []
     for i in range(count):
-        msg = new_message("buyer" if i % 2 == 0 else "seller", lines[i % len(lines)])
+        msg = new_message("buyer" if i % 2 == 0 else "seller", sample_lines[i % len(sample_lines)])
         msg["source"] = "offline_sample"
-        data["messages"].append(msg)
+        messages.append(msg)
+    combined = "\n".join(msg["text"] for msg in messages).casefold()
+    offending = [word for word in forbidden if word.casefold() in combined]
+    if offending:
+        raise ValueError(f"离线示例包含禁止词“{offending[0]}”；请修改禁止词或手动编写消息。")
+    data["messages"] = messages
     normalize_positions(data)
     assign_times(data)
     return data

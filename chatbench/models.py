@@ -32,11 +32,12 @@ def new_conversation() -> dict:
     created = now_iso()
     data = {
         "schema_version": SCHEMA_VERSION, "conversation_id": uid(), "title": "法国手机充电器模拟对话",
-        "country": "法国", "language": "法语", "timezone": "Europe/Rome",
+        "country": "法国", "language": "法语", "timezone": "Asia/Shanghai",
         "conversation_date": date.today().isoformat(), "tone": "自然商务交流",
         "goal": "了解产品并讨论采购", "allow_details": True,
         "participants": {
-            "buyer": {"name": "Camille Martin", "role": "采购经理", "company": "Atelier Lumière", "region": "法国", "style": "自然", "avatar_id": None},
+            "buyer": {"name": "Camille Martin", "role": "采购经理", "company": "Atelier Lumière", "region": "法国", "style": "自然", "avatar_id": None,
+                      "presence_mode": "hidden", "last_seen_at": None},
             "seller": {"name": "Alex Chen", "role": "销售代表", "company": "Example Supply", "region": "中国", "style": "专业友好", "avatar_id": None},
         },
         "product": {"name": "手机充电器", "brand": "", "model": "", "facts": "", "image_ids": []},
@@ -72,6 +73,19 @@ def validate_conversation(data: dict) -> dict:
         date.fromisoformat(data["conversation_date"])
     except (ZoneInfoNotFoundError, ValueError, TypeError) as exc:
         raise ValueError("无效的日期或时区。") from exc
+    buyer = data["participants"].get("buyer") if isinstance(data["participants"], dict) else None
+    if not isinstance(buyer, dict):
+        raise ValueError("买方资料无效。")
+    presence_mode = buyer.get("presence_mode", "hidden")
+    if presence_mode not in ("hidden", "online", "last_seen"):
+        raise ValueError("买方在线状态无效。")
+    if presence_mode == "last_seen":
+        try:
+            instant = datetime.fromisoformat(buyer["last_seen_at"])
+            if instant.tzinfo is None or instant.utcoffset() is None:
+                raise ValueError()
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("最后上线时间必须包含时区。") from exc
     try:
         rules = data["time_rules"]
         time.fromisoformat(rules["start"])

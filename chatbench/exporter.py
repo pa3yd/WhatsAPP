@@ -17,16 +17,13 @@ def safe_filename(title: str, identifier: str) -> str:
     return f"{clean or 'chat'}_{identifier[:8]}.png"
 
 
-def export_png(data: dict, store: Store, *, scale: int = 3) -> bytes:
-    validate_conversation(data)
+def screenshot_html(html: str, width: int, *, scale: int = 3) -> bytes:
     if scale not in (1, 2, 3):
         raise ValueError("PNG 清晰度仅支持 1–3 倍。")
-    html = render_html(data, store)
-    width = render_width(data)
     with sync_playwright() as playwright:
         try:
             browser = playwright.chromium.launch(headless=True)
-        except PlaywrightError as first_error:
+        except PlaywrightError:
             try:
                 browser = playwright.chromium.launch(channel="chrome", headless=True)
             except PlaywrightError as second_error:
@@ -42,6 +39,11 @@ def export_png(data: dict, store: Store, *, scale: int = 3) -> bytes:
             return result
         finally:
             browser.close()
+
+
+def export_png(data: dict, store: Store, *, scale: int = 3) -> bytes:
+    validate_conversation(data)
+    return screenshot_html(render_html(data, store), render_width(data), scale=scale)
 
 
 def export_zip(results: list[dict], store: Store, *, scale: int = 3) -> tuple[bytes, dict[str, str]]:

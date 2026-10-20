@@ -3,9 +3,12 @@ import json
 import zipfile
 from datetime import date, datetime, time
 from pathlib import Path
+from xml.etree import ElementTree
 
 import pytest
 from PIL import Image
+from playwright.sync_api import Error as PlaywrightError
+from playwright.sync_api import sync_playwright
 from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
@@ -14,14 +17,15 @@ from chatbench import generator
 from chatbench.generator import clone_for_batch, offline_sample, pi_discussion
 from chatbench.models import keyword_warnings, new_conversation, validate_conversation
 from chatbench.pi_reader import extract_pi
-from chatbench.renderer import render_html
+from chatbench.renderer import render_header_preview_html, render_html, render_width
 from chatbench.storage import Store
 from chatbench.time_engine import assign_times, parse_manual, timeline_warnings
+from chatbench.wallpaper import WALLPAPER_DATA_URI, _wallpaper_svg
 
 
 def test_defaults_and_manual_time_preserved():
     chat = new_conversation()
-    assert (chat["country"], chat["language"], chat["timezone"]) == ("法国", "法语", "Europe/Rome")
+    assert (chat["country"], chat["language"], chat["timezone"]) == ("法国", "法语", "Asia/Shanghai")
     assign_times(chat)
     before = chat["messages"][5]["timestamp"]
     custom = parse_manual(date.fromisoformat(chat["conversation_date"]), time(11, 17), chat["timezone"])
@@ -85,7 +89,133 @@ def test_image_roundtrip_and_render(tmp_path):
     html = render_html(loaded, store)
     assert "data:image/png;base64," in html and "Photo de démonstration" in html
     assert "虚构人物与场景" not in html and "SIMULATED CHAT" not in html
+    assert '<div class="sub">' not in html
+    assert ".classic .sender{display:none}" in html
     assert len(store.save(loaded, new_version=True)["conversation_id"]) == 32
+
+
+def test_whatsapp_last_seen_roundtrip_and_wallpaper(tmp_path):
+    store = Store(tmp_path)
+    chat = new_conversation()
+    chat["render_settings"]["style"] = "web"
+    chat["conversation_date"] = "2026-10-20"
+    chat["participants"]["buyer"].update(presence_mode="last_seen", last_seen_at="2026-10-20T15:09:00+08:00")
+    loaded = store.load(store.save(chat)["conversation_id"])
+    html = render_html(loaded, store)
+    assert "最后上线时间：今天 15:09" in html
+    assert "最后上线时间：今天 15:09" in render_header_preview_html(loaded, store)
+    assert "data:image/svg+xml;base64," in html
+    assert 'font-family:"Segoe UI","Helvetica Neue"' in html
+    assert "最后上线时间：今天 15:09" in render_html({**loaded, "render_settings": {"style": "classic"}}, store)
+    assert "最后上线时间：今天 15:09" not in render_html({**loaded, "render_settings": {"style": "wechat"}}, store)
+    assert export_png(loaded, store, scale=1).startswith(b"\x89PNG")
+    loaded["render_settings"] = {"style": "classic", "tone": "neutral"}
+    neutral_html = render_html(loaded, store)
+    with sync_playwright() as playwright:
+        try:
+            browser = playwright.chromium.launch(headless=True)
+        except PlaywrightError:
+            browser = playwright.chromium.launch(channel="chrome", headless=True)
+        try:
+            page = browser.new_page(viewport={"width": 420, "height": 720})
+            page.set_content(neutral_html)
+            assert page.locator(".head-main small").inner_text() == "最后上线时间：今天 15:09"
+            assert "data:image/svg+xml" in page.locator(".chat").evaluate("el => getComputedStyle(el).backgroundImage")
+        finally:
+            browser.close()
+
+    loaded["participants"]["buyer"]["last_seen_at"] = "2026-10-19T23:09:00+08:00"
+    assert "最后上线时间：昨天 23:09" in render_html(loaded, store)
+    loaded["timezone"] = "Europe/Paris"
+    assert "最后上线时间：昨天 17:09" in render_html(loaded, store)
+    loaded["timezone"] = "Asia/Shanghai"
+    loaded["participants"]["buyer"]["presence_mode"] = "online"
+    assert "<small>在线</small>" in render_html(loaded, store)
+    loaded["participants"]["buyer"]["presence_mode"] = "hidden"
+    assert "<small>在线</small>" not in render_html(loaded, store)
+
+    legacy = new_conversation()
+    legacy["participants"]["buyer"].pop("presence_mode")
+    legacy["participants"]["buyer"].pop("last_seen_at")
+    validate_conversation(legacy)
+    assert "最后上线时间" not in render_html(legacy, store)
+    legacy["participants"]["buyer"]["presence_mode"] = "last_seen"
+    with pytest.raises(ValueError, match="最后上线时间"):
+        validate_conversation(legacy)
+
+
+def test_wallpaper_is_dense_deterministic_and_embedded(tmp_path):
+    svg = _wallpaper_svg()
+    ElementTree.fromstring(svg)
+    assert svg == _wallpaper_svg()
+    assert svg.count("<use ") >= 120
+    assert WALLPAPER_DATA_URI.startswith("data:image/svg+xml;base64,")
+    store = Store(tmp_path)
+    with sync_playwright() as playwright:
+        try:
+            browser = playwright.chromium.launch(headless=True)
+        except PlaywrightError:
+            browser = playwright.chromium.launch(channel="chrome", headless=True)
+        try:
+            page = browser.new_page()
+            for style in ("classic", "web"):
+                for tone in ("warm", "neutral"):
+                    chat = new_conversation()
+                    chat["render_settings"].update(style=style, tone=tone)
+                    page.set_content(render_html(chat, store))
+                    background = page.locator(".chat").evaluate("el => getComputedStyle(el).backgroundImage")
+                    assert "data:image/svg+xml" in background
+        finally:
+            browser.close()
+
+
+def test_last_seen_editor_controls(tmp_path, monkeypatch):
+    from streamlit.testing.v1 import AppTest
+
+    monkeypatch.chdir(tmp_path)
+    app_path = Path(__file__).resolve().parents[1] / "app.py"
+    app = AppTest.from_file(str(app_path), default_timeout=30).run()
+    next(box for box in app.selectbox if box.label == "买方状态").set_value("last_seen").run()
+    assert not app.exception
+    assert any(widget.label == "最后上线日期" for widget in app.date_input)
+    next(widget for widget in app.date_input if widget.label == "最后上线日期").set_value(date(2026, 10, 20)).run()
+    next(widget for widget in app.time_input if widget.label == "最后上线时间").set_value(time(15, 9)).run()
+    assert not app.exception
+    assert app.session_state["chat"]["participants"]["buyer"]["last_seen_at"] == "2026-10-20T15:09+08:00"
+
+
+def test_english_offline_business_sample_uses_current_product():
+    chat = new_conversation()
+    chat["language"] = "英语"
+    chat["product"]["name"] = "solar chargers"
+    offline_sample(chat, 10)
+    assert "solar chargers" in chat["messages"][0]["text"]
+    assert "MOQ" in chat["messages"][5]["text"]
+    assert "PI terms" in chat["messages"][9]["text"]
+    chat["product"]["name"] = "手机充电器"
+    offline_sample(chat, 2)
+    assert "this product" in chat["messages"][0]["text"]
+    assert "手机充电器" not in chat["messages"][0]["text"]
+
+
+def test_offline_keywords_are_questions_not_confirmed_quotes():
+    chat = new_conversation()
+    chat["language"] = "英语"
+    chat["keywords"]["required"] = ["$2.5/pcs", "1000pcs"]
+    offline_sample(chat, 10)
+    buyer_text = chat["messages"][4]["text"]
+    assert "$2.5/pcs" in buyer_text and "1000pcs" in buyer_text
+    assert chat["messages"][4]["sender_id"] == "buyer"
+    assert "confirm" in buyer_text.lower()
+    assert "confirmed answer" in chat["messages"][5]["text"]
+    original = [message["text"] for message in chat["messages"]]
+    chat["keywords"]["forbidden"] = ["1000pcs"]
+    with pytest.raises(ValueError, match="冲突"):
+        offline_sample(chat, 10)
+    assert [message["text"] for message in chat["messages"]] == original
+    chat["keywords"]["forbidden"] = []
+    offline_sample(chat, 3)
+    assert all(word in chat["messages"][0]["text"] for word in chat["keywords"]["required"])
 
 
 def test_wechat_style_roundtrip_and_export(tmp_path):
@@ -100,6 +230,33 @@ def test_wechat_style_roundtrip_and_export(tmp_path):
     png = export_png(loaded, store)
     assert png.startswith(b"\x89PNG")
     assert 'body class="classic warm"' in render_html(new_conversation(), store)
+
+
+def test_wechat_skips_empty_messages_and_aligns_replies_right(tmp_path):
+    store = Store(tmp_path)
+    blank = new_conversation()
+    blank["render_settings"]["style"] = "wechat"
+    assert 'class="row ' not in render_html(blank, store)
+
+    chat = offline_sample(blank, 4)
+    html = render_html(chat, store)
+    assert render_width(chat) == 560
+    with sync_playwright() as playwright:
+        try:
+            browser = playwright.chromium.launch(headless=True)
+        except PlaywrightError:
+            browser = playwright.chromium.launch(channel="chrome", headless=True)
+        try:
+            page = browser.new_page(viewport={"width": 560, "height": 800})
+            page.set_content(html)
+            incoming = page.locator(".row.in .bubble").first.bounding_box()
+            outgoing = page.locator(".row.out .bubble").first.bounding_box()
+            outgoing_avatar = page.locator(".row.out .message-avatar").first.bounding_box()
+            assert incoming and outgoing and outgoing_avatar
+            assert outgoing["x"] > incoming["x"] + 50
+            assert outgoing_avatar["x"] >= outgoing["x"] + outgoing["width"]
+        finally:
+            browser.close()
 
 
 def test_wide_chat_tones_export_and_keep_simulated_label(tmp_path):
@@ -175,6 +332,42 @@ def test_png_and_zip_full_content(tmp_path):
         assert z.read(z.namelist()[0]).startswith(b"\x89PNG")
 
 
+def test_buyer_avatar_in_whatsapp_header_and_wechat_messages(tmp_path):
+    store = Store(tmp_path)
+    photo = Image.new("RGB", (64, 64), "blue")
+    buffer = io.BytesIO()
+    photo.save(buffer, format="PNG")
+    chat = offline_sample(new_conversation(), 2)
+    chat["participants"]["buyer"]["avatar_id"] = store.save_image(buffer.getvalue())
+    html = render_html(chat, store)
+    assert '<img class="avatar" src="data:image/png;base64,' in html
+    saved = store.save(chat)
+    assert store.load(saved["conversation_id"])["participants"]["buyer"]["avatar_id"] == chat["participants"]["buyer"]["avatar_id"]
+    chat["render_settings"]["style"] = "wechat"
+    html = render_html(chat, store)
+    assert '<img class="message-avatar" src="data:image/png;base64,' in html
+
+
+def test_avatar_upload_entry_and_remove(tmp_path, monkeypatch):
+    from streamlit.testing.v1 import AppTest
+
+    monkeypatch.chdir(tmp_path)
+    app_path = Path(__file__).resolve().parents[1] / "app.py"
+    app = AppTest.from_file(str(app_path), default_timeout=30).run()
+    upload_labels = [widget.label for widget in app.get("file_uploader")]
+    assert "上传或更换买方头像" in upload_labels
+    assert "上传或更换卖方头像" in upload_labels
+    assert not any(button.label.startswith("应用买方头像") for button in app.button)
+    photo = Image.new("RGB", (32, 32), "green")
+    buffer = io.BytesIO()
+    photo.save(buffer, format="PNG")
+    app.session_state["chat"]["participants"]["buyer"]["avatar_id"] = Store(tmp_path / "data").save_image(buffer.getvalue())
+    app.run()
+    next(button for button in app.button if button.label == "移除买方头像").click().run()
+    assert not app.exception
+    assert app.session_state["chat"]["participants"]["buyer"]["avatar_id"] is None
+
+
 def test_streamlit_save_and_fresh_session_load(tmp_path, monkeypatch):
     from streamlit.testing.v1 import AppTest
 
@@ -192,6 +385,28 @@ def test_streamlit_save_and_fresh_session_load(tmp_path, monkeypatch):
     next(button for button in fresh.button if button.label == "载入").click().run()
     assert not fresh.exception
     assert fresh.session_state["chat"]["messages"][0]["text"] == "Bonjour, essai sauvegardé"
+
+
+def test_timezone_choices_default_beijing_and_preserve_existing_instants(tmp_path, monkeypatch):
+    from streamlit.testing.v1 import AppTest
+
+    monkeypatch.chdir(tmp_path)
+    app_path = Path(__file__).resolve().parents[1] / "app.py"
+    app = AppTest.from_file(str(app_path), default_timeout=30).run()
+    assert app.session_state["chat"]["timezone"] == "Asia/Shanghai"
+    original_stamp = app.session_state["chat"]["messages"][0]["timestamp"]
+    timezone_choice = next(box for box in app.selectbox if box.label == "显示与排时所用时区")
+    timezone_choice.set_value("Europe/Paris").run()
+    assert not app.exception
+    assert app.session_state["chat"]["timezone"] == "Europe/Paris"
+    assert app.session_state["chat"]["messages"][0]["timestamp"] == original_stamp
+    timezone_choice = next(box for box in app.selectbox if box.label == "显示与排时所用时区")
+    timezone_choice.set_value("自定义").run()
+    next(box for box in app.text_input if box.label == "自定义 IANA 时区").set_value("Asia/Tokyo").run()
+    assert app.session_state["chat"]["timezone"] == "Asia/Tokyo"
+    next(box for box in app.text_input if box.label == "自定义 IANA 时区").set_value("Invalid/Zone").run()
+    assert app.session_state["chat"]["timezone"] == "Asia/Tokyo"
+    assert not app.exception
 
 
 def test_generation_mode_stays_selected_and_populates_preview(tmp_path, monkeypatch):

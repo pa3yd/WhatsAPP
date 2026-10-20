@@ -4,3 +4,4 @@ playwright>=1.48,<2
 openai>=1.50,<3
 pytest>=8,<10
 pypdf>=5,<7
+reportlab>=4,<5
