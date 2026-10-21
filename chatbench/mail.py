@@ -82,7 +82,6 @@ def validate_mail(data: dict) -> dict:
 
 def render_mail_html(data: dict) -> str:
     subject = escape(data["subject"])
-    account = escape(data["account"])
     folder = escape(data["folder"])
     inbox_class = "nav active" if data["folder"] == "收件箱" else "nav"
     sent_class = "nav active" if data["folder"] == "已发送" else "nav"
@@ -113,7 +112,6 @@ def render_mail_html(data: dict) -> str:
 .nav{{padding:10px 15px;border-radius:0 18px 18px 0;font-size:14px}}.nav.active{{background:#dce9fc;font-weight:700;color:#273b58}}
 .mail-main{{flex:1;min-width:0;background:#fff;border-radius:17px 0 0 0;padding:0 32px 42px;box-shadow:-1px 0 3px #d9e2ea55}}
 .toolbar{{height:56px;border-bottom:1px solid #ecedef;color:#6c747b;display:flex;align-items:center;gap:25px;font-size:16px}}
-.simulation{{margin-left:auto;font-size:11px;font-weight:700;color:#7c4f23;background:#fff1d7;padding:6px 10px;border-radius:20px;letter-spacing:.04em}}
 h1{{font-size:25px;line-height:1.35;font-weight:500;margin:25px 0 18px;overflow-wrap:anywhere}}
 .folder{{display:inline-block;vertical-align:middle;margin-left:12px;background:#edf1f5;color:#667078;border-radius:4px;font-size:11px;padding:3px 7px}}
 .message{{display:flex;gap:15px;border-top:1px solid #edf0f2;padding:21px 0 25px}}.message:first-of-type{{border-top:0}}
@@ -122,11 +120,10 @@ h1{{font-size:25px;line-height:1.35;font-weight:500;margin:25px 0 18px;overflow-
 .message-head strong{{overflow-wrap:anywhere}}time{{color:#647078;font-size:12px;white-space:nowrap}}
 .recipient,.cc{{color:#70777d;font-size:12px;margin-top:4px;overflow-wrap:anywhere}}
 .body{{margin-top:26px;white-space:pre-wrap;overflow-wrap:anywhere;font-size:14px;line-height:1.75;color:#273136}}
-.footer{{padding:15px 32px;background:#fff;color:#8a9298;font-size:11px;text-align:right;border-top:1px solid #edf0f2}}
 @media(max-width:800px){{.frame{{width:100%;min-height:0}}.top{{padding:0 17px}}.brand{{width:auto}}.search,.sidebar{{display:none}}
 .mail-main{{border-radius:0;padding:0 16px 30px}}.message-head{{flex-direction:column;gap:4px}}time{{white-space:normal}}
-.toolbar{{gap:15px}}.simulation{{font-size:9px}}.footer{{padding:12px 16px}}}}
+.toolbar{{gap:15px}}}}
 </style></head><body><div class="frame"><header class="top"><div class="brand"><span class="brand-mark">M</span>Gmail</div><div class="search">⌕　搜索邮件</div><div class="account">{escape((data['account'] or '?')[:1].upper())}</div></header>
 <div class="workspace"><aside class="sidebar"><div class="compose">✎　写邮件</div><div class="{inbox_class}">收件箱</div><div class="nav">已加星标</div><div class="{sent_class}">已发送</div><div class="nav">草稿</div></aside>
-<main class="mail-main"><div class="toolbar"><span>‹</span><span>▣</span><span>↶</span><span>⋮</span><span class="simulation">模拟邮件记录 · DEMO</span></div>
-<h1>{subject}<span class="folder">{folder}</span></h1>{''.join(cards)}</main></div><div class="footer">演示内容 · {account}</div></div></body></html>'''
+<main class="mail-main"><div class="toolbar"><span>‹</span><span>▣</span><span>↶</span><span>⋮</span></div>
+<h1>{subject}<span class="folder">{folder}</span></h1>{''.join(cards)}</main></div></div></body></html>'''

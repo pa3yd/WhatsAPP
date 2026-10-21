@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import importlib
 import json
 import os
 from datetime import date, datetime, time
@@ -11,7 +12,8 @@ import streamlit as st
 
 from chatbench.exporter import export_png, export_zip, safe_filename, screenshot_html
 from chatbench.generator import clone_for_batch, generate_ai, offline_sample, pi_discussion, regenerate_one
-from chatbench.mail import MAIL_WIDTH, MAX_MAIL_MESSAGES, new_mail_message, new_mail_record, render_mail_html, validate_mail
+from chatbench import mail as mail_renderer
+from chatbench.mail import MAIL_WIDTH, MAX_MAIL_MESSAGES, new_mail_message, new_mail_record, validate_mail
 from chatbench.invoice_ui import render_invoice_page
 from chatbench.pi_reader import FIELD_LABELS, extract_pi
 from chatbench.models import keyword_warnings, new_conversation, new_group_member, new_message, normalize_positions, sender_options, validate_conversation
@@ -152,7 +154,7 @@ def preview(chat: dict, *, height: int | None = None) -> None:
 
 
 st.title("模拟聊天工作台")
-st.caption("人物、消息、邮件与 PI 均为模拟素材，仅供培训与演示；邮件和 PI 导出带模拟标识，聊天截图不带标识。")
+st.caption("人物、消息、邮件与 PI 均为模拟素材，仅供培训与演示；PI 导出带模拟标识。")
 page = st.sidebar.radio("工作区", ["单组聊天与编辑", "PI 形式发票", "邮件记录截图", "批量生成", "历史与模板"], key="page")
 st.sidebar.caption(f"本地数据：{store.root}")
 
@@ -519,10 +521,13 @@ elif page == "PI 形式发票":
     render_invoice_page(store, st.session_state.chat, st.session_state.mail, reset_editor, reset_mail)
 
 elif page == "邮件记录截图":
+    # The renderer has no persistent state. Reload it so Streamlit reruns do not
+    # retain an imported renderer from before a live source update.
+    render_mail_html = importlib.reload(mail_renderer).render_mail_html
     mail = st.session_state.mail
     mail_revision = st.session_state.mail_rev
     st.subheader("Gmail 风格模拟邮件记录")
-    st.caption("编辑虚构邮件往来并导出截图。预览与 PNG 都带有“模拟邮件记录”标识；不会连接或发送真实邮件。")
+    st.caption("编辑邮件主题、发件人、收件人、日期与正文，按 Gmail 风格预览并导出截图。")
     if st.button("新建示例邮件", key="mail-new"):
         reset_mail(new_mail_record())
         st.rerun()
@@ -576,10 +581,10 @@ elif page == "邮件记录截图":
         try:
             validate_mail(mail)
             st.session_state.mail_png = screenshot_html(render_mail_html(mail), MAIL_WIDTH)
-            st.session_state.mail_png_fingerprint = fingerprint(mail)
+            st.session_state.mail_png_fingerprint = hashlib.sha256(render_mail_html(mail).encode("utf-8")).hexdigest()
         except Exception as exc:
             alert_error(exc)
-    if st.session_state.get("mail_png") and st.session_state.get("mail_png_fingerprint") == fingerprint(mail):
+    if st.session_state.get("mail_png") and st.session_state.get("mail_png_fingerprint") == hashlib.sha256(render_mail_html(mail).encode("utf-8")).hexdigest():
         st.download_button("下载邮件 PNG", st.session_state.mail_png,
                            file_name=safe_filename(mail["subject"], mail["mail_id"]), mime="image/png")
     st.subheader("已保存的邮件记录")

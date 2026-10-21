@@ -16,7 +16,9 @@ def test_mail_roundtrip_escaping_and_png(tmp_path):
     html = render_mail_html(mail)
     assert "&lt;script&gt;" in html and "<script>" not in html
     assert "价格待确认 &amp; 稍后答复" in html
-    assert "模拟邮件记录 · DEMO" in html
+    assert "模拟邮件记录 · DEMO" not in html
+    assert "演示内容 ·" not in html
+    assert 'class="footer"' not in html
 
     store = Store(tmp_path)
     saved = store.save_mail(mail)
