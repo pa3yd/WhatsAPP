@@ -10,6 +10,12 @@ from zoneinfo import ZoneInfo
 
 import streamlit as st
 
+from chatbench import exporter as chat_exporter, renderer as chat_renderer
+
+# Refresh the stateless render/export modules together when Streamlit reruns.
+importlib.reload(chat_renderer)
+importlib.reload(chat_exporter)
+
 from chatbench.exporter import export_png, export_zip, safe_filename, screenshot_html
 from chatbench.generator import clone_for_batch, generate_ai, offline_sample, pi_discussion, regenerate_one
 from chatbench import mail as mail_renderer
@@ -116,7 +122,7 @@ normalize_positions(data)
 
 
 def fingerprint(chat: dict) -> str:
-    return hashlib.sha256(json.dumps(chat, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+    return hashlib.sha256(render_html(chat, store).encode("utf-8")).hexdigest()
 
 
 def comma_list(value: str) -> list[str]:
@@ -221,6 +227,13 @@ if page == "单组聊天与编辑":
                 index=["warm", "neutral"].index(render_settings.get("tone", "warm")),
                 format_func=lambda value: {"warm": "柔和暖色", "neutral": "清爽中性"}[value],
                 key=f"{revision}-render-tone")
+        if render_settings["style"] == "wechat":
+            render_settings["wechat_time_gap_minutes"] = int(st.number_input(
+                "微信时间标签间隔（分钟）", min_value=1, max_value=60,
+                value=render_settings.get("wechat_time_gap_minutes", 5),
+                key=f"{revision}-wechat-time-gap",
+            ))
+            st.caption("首条消息、跨日及相邻消息间隔达到设定值时，居中显示时间。也可在单条消息中指定显示；消息的实际时间在下方时间轴编辑。")
         data["allow_details"] = st.checkbox("允许 AI 补充合理细节", data["allow_details"], key=f"{revision}-details")
         st.subheader("聊天头像")
         st.caption("选择 PNG、JPG 或 WebP 图片后立即应用。买方头像显示在 WhatsApp 风格聊天顶部；微信风格还会在买卖双方消息旁显示各自头像。")
@@ -442,6 +455,10 @@ if page == "单组聊天与编辑":
         badge = "📎" if msg.get("asset_id") else ""
         with st.expander(f"{index+1:02d} · {msg['sender_id']} · {display_stamp or '未设置时间'}{gap} · {summary} {badge}"):
             key = f"{revision}-{msg['id']}"
+            if render_settings["style"] == "wechat":
+                msg["show_time_label"] = st.checkbox("在此消息前显示时间", bool(msg.get("show_time_label", False)), key=key+"-show-time-label")
+                if msg["show_time_label"] and not stamp:
+                    st.caption("请先为此消息设置时间，时间标签才会显示。")
             people = sender_options(data)
             sender_ids = list(people)
             msg["sender_id"] = st.selectbox("发送方", sender_ids, index=sender_ids.index(msg["sender_id"]) if msg["sender_id"] in people else 0,

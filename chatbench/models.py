@@ -58,7 +58,7 @@ def new_conversation() -> dict:
                        "min_minutes": 5, "max_minutes": 30, "type_intervals": {},
                        "mode": "mixed", "preset": "正常回复"},
         "messages": [new_message("buyer" if i % 2 == 0 else "seller") for i in range(10)],
-        "render_settings": {"width": 420, "style": "classic"}, "created_at": created, "updated_at": created,
+        "render_settings": {"width": 420, "style": "classic", "wechat_time_gap_minutes": 5}, "created_at": created, "updated_at": created,
     }
     normalize_positions(data)
     return data
@@ -75,6 +75,9 @@ def validate_conversation(data: dict) -> dict:
         raise ValueError("不支持的聊天界面样式。")
     if settings.get("tone", "warm") not in ("warm", "neutral"):
         raise ValueError("不支持的聊天色调。")
+    time_gap = settings.get("wechat_time_gap_minutes", 5)
+    if type(time_gap) is not int or not 1 <= time_gap <= 60:
+        raise ValueError("微信时间标签间隔必须为 1–60 分钟的整数。")
     pi = data.get("pi")
     if pi is not None and (not isinstance(pi, dict) or not isinstance(pi.get("fields"), dict)
                            or any(not isinstance(key, str) or not isinstance(value, str)
@@ -135,6 +138,8 @@ def validate_conversation(data: dict) -> dict:
         if msg["id"] in ids:
             raise ValueError("消息 ID 重复。")
         ids.add(msg["id"])
+        if not isinstance(msg.get("show_time_label", False), bool):
+            raise ValueError(f"第 {i} 条消息的时间标签设置无效。")
         if msg.get("position") != i - 1:
             raise ValueError(f"第 {i} 条消息的排序位置与列表顺序不一致。")
         if msg.get("sender_id") not in valid_senders or msg.get("type") not in MESSAGE_TYPES:

@@ -15,7 +15,7 @@ from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 from chatbench.exporter import export_png, export_zip
 from chatbench import generator
 from chatbench.generator import clone_for_batch, offline_sample, pi_discussion
-from chatbench.models import keyword_warnings, new_conversation, new_group_member, validate_conversation
+from chatbench.models import keyword_warnings, new_conversation, new_group_member, new_message, normalize_positions, validate_conversation
 from chatbench.pi_reader import extract_pi
 from chatbench.renderer import render_header_preview_html, render_html, render_width
 from chatbench.storage import Store
@@ -261,6 +261,96 @@ def test_three_person_group_roundtrip_and_both_chat_styles(tmp_path):
     saved["group"]["members"] = []
     with pytest.raises(ValueError, match="至少需要三名成员"):
         validate_conversation(saved)
+
+
+def test_wechat_group_time_separators_and_nicknames(tmp_path):
+    store = Store(tmp_path)
+    chat = new_conversation()
+    member = new_group_member("技术同事")
+    chat["group"] = {"enabled": True, "name": "产品讨论群", "members": [member]}
+    chat["render_settings"]["style"] = "wechat"
+    chat["conversation_date"] = "2026-10-21"
+    times = ("07:57:00", "07:57:20", "07:57:40", "08:03:00", "08:03:20", "08:04:00")
+    senders = ("buyer", member["id"], "buyer", "seller", "seller", "buyer")
+    chat["messages"] = [new_message(sender, "确认一下规格", timestamp=f"2026-10-21T{clock}+08:00")
+                        for sender, clock in zip(senders, times)]
+    # An empty hidden message must not suppress the next visible time separator.
+    chat["messages"].insert(3, new_message("buyer", "", timestamp="2026-10-21T08:02:00+08:00"))
+    normalize_positions(chat)
+    original_times = [message["timestamp"] for message in chat["messages"]]
+    with sync_playwright() as playwright:
+        try:
+            browser = playwright.chromium.launch(headless=True)
+        except PlaywrightError:
+            browser = playwright.chromium.launch(channel="chrome", headless=True)
+        try:
+            page = browser.new_page(viewport={"width": 720, "height": 900})
+            page.set_content(render_html(chat, store))
+            assert page.locator(".day").all_text_contents() == ["07:57", "08:03"]
+            assert page.locator(".head-main strong").inner_text() == "产品讨论群 (3)"
+            assert page.locator(".head-main small").count() == 0
+            assert page.locator(".bubble .sender").count() == 0
+            name = page.locator(".row.in .sender").first.bounding_box()
+            bubble = page.locator(".row.in .bubble").first.bounding_box()
+            avatar = page.locator(".row.in .message-avatar").first.bounding_box()
+            assert name and bubble and avatar
+            assert name["y"] + name["height"] <= bubble["y"]
+            assert avatar["x"] < bubble["x"]
+            assert page.locator(".row.out .sender").count() == 0
+            own_avatar = page.locator(".row.out .message-avatar").first.bounding_box()
+            own_bubble = page.locator(".row.out .bubble").first.bounding_box()
+            assert own_avatar and own_bubble and own_avatar["x"] > own_bubble["x"] + own_bubble["width"]
+            short_text = chat["messages"][-1]["text"]
+            chat["messages"][-1]["text"] = "Could you confirm the specifications and share the updated packaging requirements with everyone in the group?"
+            for viewport_width in (720, 612):
+                page.set_viewport_size({"width": viewport_width, "height": 900})
+                page.set_content(render_html(chat, store))
+                assert page.locator(".frame").evaluate("el => el.scrollWidth <= el.clientWidth")
+                wraps_naturally = page.locator(".row.in .bubble").last.evaluate(r"""bubble => {
+                    const content = bubble.querySelector('.text');
+                    const range = document.createRange();
+                    range.selectNodeContents(content);
+                    const context = document.createElement('canvas').getContext('2d');
+                    context.font = getComputedStyle(content).font;
+                    const maxWord = Math.max(...content.textContent.split(/\s+/).map(word => context.measureText(word).width));
+                    const padding = parseFloat(getComputedStyle(bubble).paddingRight);
+                    return bubble.getBoundingClientRect().right - range.getClientRects()[0].right <= maxWord + padding + 2;
+                }""")
+                assert wraps_naturally
+            chat["messages"][-1]["text"] = short_text
+            chat["render_settings"]["wechat_time_gap_minutes"] = 30
+            chat["messages"][-1]["show_time_label"] = True
+            page.set_content(render_html(chat, store))
+            assert page.locator(".day").all_text_contents() == ["07:57", "08:04"]
+            chat["messages"].append(new_message("buyer", "次日消息", timestamp="2026-10-22T00:01:00+08:00"))
+            normalize_positions(chat)
+            chat["conversation_date"] = "2026-10-22"
+            page.set_content(render_html(chat, store))
+            assert page.locator(".day").all_text_contents() == ["昨天 07:57", "昨天 08:04", "00:01"]
+        finally:
+            browser.close()
+    assert [message["timestamp"] for message in chat["messages"][:-1]] == original_times
+    loaded = store.load(store.save(chat)["conversation_id"])
+    assert loaded["render_settings"]["wechat_time_gap_minutes"] == 30
+    assert loaded["messages"][-2]["show_time_label"] is True
+
+
+def test_wechat_time_controls_preserve_message_times(tmp_path, monkeypatch):
+    from streamlit.testing.v1 import AppTest
+
+    monkeypatch.chdir(tmp_path)
+    app = AppTest.from_file(str(Path(__file__).resolve().parents[1] / "app.py"), default_timeout=30).run()
+    original_times = [message["timestamp"] for message in app.session_state["chat"]["messages"]]
+    next(box for box in app.selectbox if box.label == "对话界面样式").set_value("wechat").run()
+    control = next(box for box in app.number_input if box.label == "微信时间标签间隔（分钟）")
+    assert control.value == 5
+    control.set_value(8).run()
+    next(box for box in app.checkbox if box.label == "在此消息前显示时间").set_value(True).run()
+    assert not app.exception
+    chat = app.session_state["chat"]
+    assert chat["render_settings"]["wechat_time_gap_minutes"] == 8
+    assert chat["messages"][0]["show_time_label"] is True
+    assert [message["timestamp"] for message in chat["messages"]] == original_times
 
 
 def test_group_ai_uses_member_ids_without_live_api(monkeypatch):
