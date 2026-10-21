@@ -15,7 +15,7 @@ from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 from chatbench.exporter import export_png, export_zip
 from chatbench import generator
 from chatbench.generator import clone_for_batch, offline_sample, pi_discussion
-from chatbench.models import keyword_warnings, new_conversation, validate_conversation
+from chatbench.models import keyword_warnings, new_conversation, new_group_member, validate_conversation
 from chatbench.pi_reader import extract_pi
 from chatbench.renderer import render_header_preview_html, render_html, render_width
 from chatbench.storage import Store
@@ -232,6 +232,65 @@ def test_wechat_style_roundtrip_and_export(tmp_path):
     assert 'body class="classic warm"' in render_html(new_conversation(), store)
 
 
+def test_classic_mobile_chat_renders_emoji_and_message_status(tmp_path):
+    store = Store(tmp_path)
+    chat = offline_sample(new_conversation(), 2)
+    chat["messages"][1]["text"] = "好的 🙂"
+    html = render_html(chat, store)
+    assert 'class="status-bar"' in html
+    assert 'class="home-indicator"' in html
+    assert "好的 🙂" in html
+    assert html.count('class="read-mark"') == 1
+    assert export_png(chat, store, scale=1).startswith(b"\x89PNG")
+
+
+def test_three_person_group_roundtrip_and_both_chat_styles(tmp_path):
+    store = Store(tmp_path)
+    chat = new_conversation()
+    member = new_group_member("Nina")
+    chat["group"] = {"enabled": True, "name": "采购讨论群", "members": [member]}
+    offline_sample(chat, 6)
+    assert {message["sender_id"] for message in chat["messages"]} == {"buyer", "seller", member["id"]}
+    saved = store.load(store.save(chat)["conversation_id"])
+    for style in ("classic", "wechat"):
+        saved["render_settings"]["style"] = style
+        html = render_html(saved, store)
+        assert "采购讨论群" in html and "Nina" in html
+        assert "group" in html and 'class="message-avatar placeholder"' in html
+        assert export_png(saved, store, scale=1).startswith(b"\x89PNG")
+    saved["group"]["members"] = []
+    with pytest.raises(ValueError, match="至少需要三名成员"):
+        validate_conversation(saved)
+
+
+def test_group_ai_uses_member_ids_without_live_api(monkeypatch):
+    chat = new_conversation()
+    member = new_group_member("Nina")
+    chat["group"] = {"enabled": True, "name": "采购讨论群", "members": [member]}
+    def fake_model(prompt, count, sender_ids=None):
+        assert sender_ids == ["buyer", "seller", member["id"]]
+        return [{"sender_id": sender_ids[i % len(sender_ids)], "text": f"消息 {i}"} for i in range(count)]
+    monkeypatch.setattr(generator, "_call_model", fake_model)
+    generator.generate_ai(chat, 6)
+    assert {message["sender_id"] for message in chat["messages"]} == {"buyer", "seller", member["id"]}
+    validate_conversation(chat)
+
+
+def test_group_editor_adds_member_and_sender_choice(tmp_path, monkeypatch):
+    from streamlit.testing.v1 import AppTest
+
+    monkeypatch.chdir(tmp_path)
+    app_path = Path(__file__).resolve().parents[1] / "app.py"
+    app = AppTest.from_file(str(app_path), default_timeout=30).run()
+    next(box for box in app.checkbox if box.label == "三人及以上群聊").set_value(True).run()
+    assert not app.exception
+    member_id = app.session_state["chat"]["group"]["members"][0]["id"]
+    sender = next(box for box in app.selectbox if box.label == "发送方")
+    sender.set_value(member_id).run()
+    assert not app.exception
+    assert app.session_state["chat"]["messages"][0]["sender_id"] == member_id
+
+
 def test_wechat_skips_empty_messages_and_aligns_replies_right(tmp_path):
     store = Store(tmp_path)
     blank = new_conversation()
@@ -239,15 +298,18 @@ def test_wechat_skips_empty_messages_and_aligns_replies_right(tmp_path):
     assert 'class="row ' not in render_html(blank, store)
 
     chat = offline_sample(blank, 4)
+    chat["messages"][1]["text"] = "  好的  "
     html = render_html(chat, store)
-    assert render_width(chat) == 560
+    assert ">好的</div>" in html
+    assert ">  好的  </div>" not in html
+    assert render_width(chat) == 720
     with sync_playwright() as playwright:
         try:
             browser = playwright.chromium.launch(headless=True)
         except PlaywrightError:
             browser = playwright.chromium.launch(channel="chrome", headless=True)
         try:
-            page = browser.new_page(viewport={"width": 560, "height": 800})
+            page = browser.new_page(viewport={"width": 720, "height": 800})
             page.set_content(html)
             incoming = page.locator(".row.in .bubble").first.bounding_box()
             outgoing = page.locator(".row.out .bubble").first.bounding_box()
@@ -255,6 +317,9 @@ def test_wechat_skips_empty_messages_and_aligns_replies_right(tmp_path):
             assert incoming and outgoing and outgoing_avatar
             assert outgoing["x"] > incoming["x"] + 50
             assert outgoing_avatar["x"] >= outgoing["x"] + outgoing["width"]
+            assert outgoing["width"] < 80
+            assert page.locator(".row.out .bubble").first.evaluate("el => getComputedStyle(el).backgroundColor") == "rgb(157, 242, 159)"
+            assert page.locator(".chat").evaluate("el => getComputedStyle(el).backgroundColor") == "rgb(250, 250, 250)"
         finally:
             browser.close()
 
@@ -424,13 +489,14 @@ def test_generation_mode_stays_selected_and_populates_preview(tmp_path, monkeypa
 
 
 def test_ai_gate_and_single_message_preservation(monkeypatch):
+    monkeypatch.setattr("dotenv.load_dotenv", lambda *args, **kwargs: False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     with pytest.raises(RuntimeError, match="OPENAI_API_KEY"):
         generator._call_model("test", 1)
     chat = offline_sample(new_conversation(), 10)
     chat["messages"][4]["locked"] = True
     before = json.loads(json.dumps(chat, ensure_ascii=False))
-    monkeypatch.setattr(generator, "_call_model", lambda prompt, count: [{"sender_id": "seller", "text": "Réponse modifiée"}])
+    monkeypatch.setattr(generator, "_call_model", lambda prompt, count, sender_ids=None: [{"sender_id": "seller", "text": "Réponse modifiée"}])
     generator.regenerate_one(chat, chat["messages"][5]["id"])
     assert chat["messages"][5]["text"] == "Réponse modifiée"
     assert chat["messages"][5]["timestamp"] == before["messages"][5]["timestamp"]

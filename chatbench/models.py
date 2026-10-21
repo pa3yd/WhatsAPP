@@ -23,6 +23,17 @@ def new_message(sender: str = "buyer", text: str = "", *, timestamp: str | None 
             "source": "manual", "position": 0}
 
 
+def new_group_member(name: str = "新成员") -> dict:
+    return {"id": "member_" + uid(), "name": name, "avatar_id": None}
+
+
+def sender_options(data: dict) -> dict[str, dict]:
+    people = {key: data["participants"][key] for key in SENDER_IDS}
+    if data.get("group", {}).get("enabled"):
+        people.update({item["id"]: item for item in data["group"].get("members", [])})
+    return people
+
+
 def normalize_positions(data: dict) -> None:
     for index, msg in enumerate(data["messages"]):
         msg["position"] = index
@@ -40,6 +51,7 @@ def new_conversation() -> dict:
                       "presence_mode": "hidden", "last_seen_at": None},
             "seller": {"name": "Alex Chen", "role": "销售代表", "company": "Example Supply", "region": "中国", "style": "专业友好", "avatar_id": None},
         },
+        "group": {"enabled": False, "name": "", "members": []},
         "product": {"name": "手机充电器", "brand": "", "model": "", "facts": "", "image_ids": []},
         "keywords": {"required": [], "forbidden": []},
         "time_rules": {"start": "09:00", "end": "16:30", "end_day_offset": 0,
@@ -99,6 +111,23 @@ def validate_conversation(data: dict) -> dict:
         raise ValueError("时间规则无效。") from exc
     if not isinstance(data["messages"], list):
         raise ValueError("messages 必须为列表。")
+    group = data.get("group", {})
+    if not isinstance(group, dict):
+        raise ValueError("群聊设置无效。")
+    if group.get("enabled"):
+        members = group.get("members", [])
+        if not isinstance(group.get("name"), str) or not group["name"].strip():
+            raise ValueError("请填写群聊名称。")
+        if not isinstance(members, list) or not members:
+            raise ValueError("群聊至少需要三名成员。")
+        member_ids = set()
+        for member in members:
+            if (not isinstance(member, dict) or not isinstance(member.get("id"), str)
+                    or not member["id"].startswith("member_") or not isinstance(member.get("name"), str)
+                    or not member["name"].strip() or member["id"] in member_ids):
+                raise ValueError("群成员 ID 或姓名无效。")
+            member_ids.add(member["id"])
+    valid_senders = sender_options(data)
     ids = set()
     for i, msg in enumerate(data["messages"], 1):
         if not isinstance(msg, dict) or not isinstance(msg.get("id"), str) or not msg["id"]:
@@ -108,7 +137,7 @@ def validate_conversation(data: dict) -> dict:
         ids.add(msg["id"])
         if msg.get("position") != i - 1:
             raise ValueError(f"第 {i} 条消息的排序位置与列表顺序不一致。")
-        if msg.get("sender_id") not in SENDER_IDS or msg.get("type") not in MESSAGE_TYPES:
+        if msg.get("sender_id") not in valid_senders or msg.get("type") not in MESSAGE_TYPES:
             raise ValueError(f"第 {i} 条消息发送方或类型无效。")
         if msg.get("type") in ("image", "image_text") and not msg.get("asset_id"):
             raise ValueError(f"第 {i} 条图片消息缺少图片资源。")

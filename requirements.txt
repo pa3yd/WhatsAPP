@@ -2,6 +2,7 @@ streamlit>=1.39,<2
 Pillow>=10.4,<13
 playwright>=1.48,<2
 openai>=1.50,<3
+python-dotenv>=1,<2
 pytest>=8,<10
 pypdf>=5,<7
 reportlab>=4,<5

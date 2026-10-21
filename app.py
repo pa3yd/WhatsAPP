@@ -14,7 +14,7 @@ from chatbench.generator import clone_for_batch, generate_ai, offline_sample, pi
 from chatbench.mail import MAIL_WIDTH, MAX_MAIL_MESSAGES, new_mail_message, new_mail_record, render_mail_html, validate_mail
 from chatbench.invoice_ui import render_invoice_page
 from chatbench.pi_reader import FIELD_LABELS, extract_pi
-from chatbench.models import keyword_warnings, new_conversation, new_message, normalize_positions, validate_conversation
+from chatbench.models import keyword_warnings, new_conversation, new_group_member, new_message, normalize_positions, sender_options, validate_conversation
 from chatbench.renderer import render_header_preview_html, render_html
 from chatbench.storage import Store
 from chatbench.time_engine import assign_times, parse_manual, timeline_warnings
@@ -186,8 +186,34 @@ if page == "单组聊天与编辑":
         current_style = render_settings.get("style", "classic")
         render_settings["style"] = st.selectbox("对话界面样式", ["classic", "wechat", "web"],
             index=["classic", "wechat", "web"].index(current_style),
-            format_func=lambda value: {"classic": "原有样式", "wechat": "微信风格", "web": "宽屏聊天风格"}[value],
+            format_func=lambda value: {"classic": "WhatsApp 手机风格", "wechat": "微信风格", "web": "宽屏聊天风格"}[value],
             key=f"{revision}-render-style")
+        group = data.setdefault("group", {"enabled": False, "name": "", "members": []})
+        member_ids = {member["id"] for member in group.get("members", [])}
+        group_messages = any(message.get("sender_id") in member_ids for message in data["messages"])
+        group["enabled"] = st.checkbox("三人及以上群聊", bool(group.get("enabled")), key=f"{revision}-group-enabled",
+            disabled=bool(group.get("enabled") and group_messages))
+        if group_messages:
+            st.caption("已有群成员消息。需要先调整这些消息的发送方，才能切回单聊。")
+        if group["enabled"]:
+            if not group["members"]:
+                group["members"].append(new_group_member())
+            group["name"] = st.text_input("群聊名称", group.get("name") or "商务讨论群", key=f"{revision}-group-name")
+            st.caption("卖方消息显示在右侧；买方和其他成员显示在左侧。群成员姓名与头像只影响显示，不改变已有单聊记录。")
+            for member in list(group["members"]):
+                with st.expander(f"群成员 · {member['name']}"):
+                    member["name"] = st.text_input("成员姓名", member["name"], key=f"{revision}-{member['id']}-name")
+                    uploaded = st.file_uploader("成员头像", type=["png", "jpg", "jpeg", "webp"], key=f"{revision}-{member['id']}-avatar")
+                    if uploaded:
+                        member["avatar_id"] = store.save_image(uploaded.getvalue())
+                    if member.get("avatar_id"):
+                        st.image(str(store.image_path(member["avatar_id"])), width=64)
+                    if st.button("移除成员", key=f"{revision}-{member['id']}-remove", disabled=len(group["members"]) <= 1 or any(m["sender_id"] == member["id"] for m in data["messages"])):
+                        group["members"].remove(member)
+                        reset_editor(data); st.rerun()
+            if st.button("新增群成员", key=f"{revision}-add-group-member"):
+                group["members"].append(new_group_member())
+                reset_editor(data); st.rerun()
         if render_settings["style"] == "web":
             render_settings["tone"] = st.selectbox("宽屏色调", ["warm", "neutral"],
                 index=["warm", "neutral"].index(render_settings.get("tone", "warm")),
@@ -351,14 +377,15 @@ if page == "单组聊天与编辑":
                 elif mode == "离线示例":
                     offline_sample(draft, int(count))
                 else:
-                    draft["messages"] = [new_message("buyer" if i % 2 == 0 else "seller") for i in range(int(count))]
+                    people = list(sender_options(draft))
+                    draft["messages"] = [new_message(people[i % len(people)]) for i in range(int(count))]
                     if rules["mode"] != "manual":
                         assign_times(draft)
                 reset_editor(draft)
                 st.rerun()
             except Exception as exc:
                 alert_error(exc)
-        st.caption("完全手动只创建空白消息；离线示例会填入演示文字。整组重新生成会替换当前消息，建议先保存当前版本。AI 功能需另行配置密钥。")
+        st.caption("完全手动只创建空白消息；离线示例会填入演示文字。整组重新生成会替换当前消息，建议先保存当前版本。")
     try:
         display_zone = ZoneInfo(data["timezone"])
     except Exception:
@@ -413,7 +440,11 @@ if page == "单组聊天与编辑":
         badge = "📎" if msg.get("asset_id") else ""
         with st.expander(f"{index+1:02d} · {msg['sender_id']} · {display_stamp or '未设置时间'}{gap} · {summary} {badge}"):
             key = f"{revision}-{msg['id']}"
-            msg["sender_id"] = st.selectbox("发送方", ["buyer", "seller"], index=["buyer", "seller"].index(msg["sender_id"]), key=key+"-sender", on_change=lambda m=msg, k=key+"-sender": m.update(sender_id=st.session_state[k]))
+            people = sender_options(data)
+            sender_ids = list(people)
+            msg["sender_id"] = st.selectbox("发送方", sender_ids, index=sender_ids.index(msg["sender_id"]) if msg["sender_id"] in people else 0,
+                format_func=lambda person_id: people[person_id].get("name") or person_id,
+                key=key+"-sender", on_change=lambda m=msg, k=key+"-sender": m.update(sender_id=st.session_state[k]))
             def sync_text(m=msg, k=key+"-text"):
                 m["text"] = st.session_state[k]
                 m["type"] = "image_text" if m.get("asset_id") and m["text"] else "image" if m.get("asset_id") else "text"

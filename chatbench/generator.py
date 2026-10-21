@@ -3,8 +3,9 @@ from __future__ import annotations
 import json
 import os
 import re
+from pathlib import Path
 
-from .models import new_message, normalize_positions, uid
+from .models import new_message, normalize_positions, sender_options, uid
 from .pi_reader import FIELD_LABELS
 from .time_engine import assign_times
 
@@ -46,8 +47,10 @@ def offline_sample(data: dict, count: int) -> dict:
         else:
             sample_lines[0] += " " + buyer_prompt.format(keywords=keyword_text)
     messages = []
+    incoming = [key for key in sender_options(data) if key != "seller"]
     for i in range(count):
-        msg = new_message("buyer" if i % 2 == 0 else "seller", sample_lines[i % len(sample_lines)])
+        sender = incoming[(i // 2) % len(incoming)] if i % 2 == 0 else "seller"
+        msg = new_message(sender, sample_lines[i % len(sample_lines)])
         msg["source"] = "offline_sample"
         messages.append(msg)
     combined = "\n".join(msg["text"] for msg in messages).casefold()
@@ -81,8 +84,10 @@ def pi_discussion(data: dict, count: int) -> dict:
         "我们会整理待确认事项，不将模拟对话作为正式承诺。" if chinese else "We will list the open points; this simulated chat is not a formal commitment.",
     ])
     data["messages"] = []
+    incoming = [key for key in sender_options(data) if key != "seller"]
     for index in range(count):
-        message = new_message("buyer" if index % 2 == 0 else "seller", lines[index % len(lines)])
+        sender = incoming[(index // 2) % len(incoming)] if index % 2 == 0 else "seller"
+        message = new_message(sender, lines[index % len(lines)])
         message["source"] = "pi_offline_sample"
         data["messages"].append(message)
     normalize_positions(data)
@@ -90,40 +95,52 @@ def pi_discussion(data: dict, count: int) -> dict:
     return data
 
 
-def _schema(count: int) -> dict:
-    return {"type": "object", "properties": {"messages": {"type": "array", "items": {"type": "object", "properties": {"sender_id": {"type": "string", "enum": ["buyer", "seller"]}, "text": {"type": "string"}}, "required": ["sender_id", "text"], "additionalProperties": False}}}, "required": ["messages"], "additionalProperties": False}
+def _schema(sender_ids: list[str]) -> dict:
+    return {"type": "object", "properties": {"messages": {"type": "array", "items": {"type": "object", "properties": {"sender_id": {"type": "string", "enum": sender_ids}, "text": {"type": "string"}}, "required": ["sender_id", "text"], "additionalProperties": False}}}, "required": ["messages"], "additionalProperties": False}
 
 
-def _call_model(prompt: str, count: int) -> list[dict]:
+def _call_model(prompt: str, count: int, sender_ids: list[str] | None = None) -> list[dict]:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).resolve().parents[1] / ".env.local", override=False)
     if not os.environ.get("OPENAI_API_KEY", "").strip():
         raise RuntimeError("未配置 OPENAI_API_KEY；可继续使用完全手动模式或离线示例。")
-    from openai import OpenAI
+    from openai import OpenAI, RateLimitError
 
     client = OpenAI(timeout=60)
-    response = client.responses.create(
-        model=os.environ.get("OPENAI_MODEL", "gpt-4o-mini"),
-        instructions="Create a fictional business chat for training. Return only the requested JSON. Do not claim that it is a real WhatsApp conversation. Do not invent verified specifications, prices or commitments.",
-        input=prompt,
-        text={"format": {"type": "json_schema", "name": "chat_messages", "strict": True, "schema": _schema(count)}},
-        store=False,
-    )
+    try:
+        response = client.responses.create(
+            model=os.environ.get("OPENAI_MODEL", "gpt-4o-mini"),
+            instructions="Create a fictional business chat for training. Return only the requested JSON. Do not claim that it is a real WhatsApp conversation. Do not invent verified specifications, prices or commitments.",
+            input=prompt,
+            text={"format": {"type": "json_schema", "name": "chat_messages", "strict": True, "schema": _schema(sender_ids or ["buyer", "seller"])}},
+            store=False,
+        )
+    except RateLimitError as exc:
+        if "credit_balance_exhausted" in str(exc) or "insufficient_quota" in str(exc):
+            raise RuntimeError("OpenAI 项目 API 额度已用完；请检查项目计费余额，原对话未被替换。") from exc
+        raise
     if response.status != "completed" or not response.output_text:
         raise RuntimeError("模型未返回完整聊天内容。")
     parsed = json.loads(response.output_text)["messages"]
-    if len(parsed) != count or any(not isinstance(item.get("text"), str) for item in parsed):
+    if len(parsed) != count or any(not isinstance(item.get("text"), str) or item.get("sender_id") not in (sender_ids or ["buyer", "seller"]) for item in parsed):
         raise RuntimeError(f"模型返回 {len(parsed)} 条消息，预期 {count} 条；请重试。")
     return parsed
 
 
 def generate_ai(data: dict, count: int) -> dict:
+    people = sender_options(data)
+    is_group = bool(data.get("group", {}).get("enabled"))
     prompt = json.dumps({
-        "task": f"Write exactly {count} alternating buyer/seller messages. User may edit afterward.",
+        "task": (f"Write exactly {count} group chat messages. Use all participants when the count permits; seller replies on their own account. User may edit afterward."
+                 if is_group else f"Write exactly {count} alternating buyer/seller messages. User may edit afterward."),
         "country": data["country"], "language": data["language"], "tone": data["tone"],
-        "goal": data["goal"], "participants": data["participants"], "product": {k: v for k, v in data["product"].items() if k != "image_ids"},
+        "goal": data["goal"], "participants": {key: {"name": person.get("name", ""), "role": person.get("role", "")} for key, person in people.items()}, "product": {k: v for k, v in data["product"].items() if k != "image_ids"},
         "required_keywords": data["keywords"]["required"], "forbidden_keywords": data["keywords"]["forbidden"],
         "allow_details": data["allow_details"],
     }, ensure_ascii=False)
-    items = _call_model(prompt, count)
+    items = _call_model(prompt, count, list(people))
+    if is_group and count >= len(people) and set(people) - {item["sender_id"] for item in items}:
+        raise RuntimeError("模型未让所有群成员发言；原对话未被替换，请重试或手动调整。")
     messages = []
     for item in items:
         msg = new_message(item["sender_id"], item["text"])
@@ -144,7 +161,7 @@ def regenerate_one(data: dict, message_id: str) -> None:
         raise ValueError("该消息已锁定。")
     context = [{"sender_id": m["sender_id"], "text": m["text"]} for m in data["messages"][max(0, index - 3): index + 4]]
     prompt = json.dumps({"task": "Rewrite only the target message. Keep sender and context coherent. Return exactly one message.", "target_index": min(3, index), "context": context, "language": data["language"], "tone": data["tone"], "product": data["product"]["name"], "forbidden_keywords": data["keywords"]["forbidden"]}, ensure_ascii=False)
-    replacement = _call_model(prompt, 1)[0]
+    replacement = _call_model(prompt, 1, [old["sender_id"]])[0]
     old["text"] = replacement["text"]
     old["source"] = "ai"
 
