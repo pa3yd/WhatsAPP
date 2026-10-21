@@ -336,15 +336,18 @@ def test_wechat_wrapped_message_uses_bubble_width(tmp_path):
         except PlaywrightError:
             browser = playwright.chromium.launch(channel="chrome", headless=True)
         try:
-            page = browser.new_page(viewport={"width": 720, "height": 800})
-            page.set_content(render_html(chat, store))
-            first_line_gap = page.locator(".row.out .bubble").first.evaluate("""bubble => {
-                const content = bubble.querySelector('.text');
-                const range = document.createRange();
-                range.selectNodeContents(content);
-                return bubble.getBoundingClientRect().right - range.getClientRects()[0].right;
-            }""")
-            assert first_line_gap < 60
+            for width in (720, 612):
+                page = browser.new_page(viewport={"width": width, "height": 800})
+                page.set_content(render_html(chat, store))
+                first_line_gap = page.locator(".row.out .bubble").first.evaluate("""bubble => {
+                    const content = bubble.querySelector('.text');
+                    const range = document.createRange();
+                    range.selectNodeContents(content);
+                    return bubble.getBoundingClientRect().right - range.getClientRects()[0].right;
+                }""")
+                assert first_line_gap < 60
+                assert page.locator(".row.out .text").first.evaluate("el => getComputedStyle(el).textWrapMode") == "wrap"
+                page.close()
         finally:
             browser.close()
 
