@@ -324,6 +324,31 @@ def test_wechat_skips_empty_messages_and_aligns_replies_right(tmp_path):
             browser.close()
 
 
+def test_wechat_wrapped_message_uses_bubble_width(tmp_path):
+    store = Store(tmp_path)
+    chat = new_conversation()
+    chat["language"] = "英语"
+    chat["render_settings"]["style"] = "wechat"
+    offline_sample(chat, 4)
+    with sync_playwright() as playwright:
+        try:
+            browser = playwright.chromium.launch(headless=True)
+        except PlaywrightError:
+            browser = playwright.chromium.launch(channel="chrome", headless=True)
+        try:
+            page = browser.new_page(viewport={"width": 720, "height": 800})
+            page.set_content(render_html(chat, store))
+            first_line_gap = page.locator(".row.out .bubble").first.evaluate("""bubble => {
+                const content = bubble.querySelector('.text');
+                const range = document.createRange();
+                range.selectNodeContents(content);
+                return bubble.getBoundingClientRect().right - range.getClientRects()[0].right;
+            }""")
+            assert first_line_gap < 60
+        finally:
+            browser.close()
+
+
 def test_wide_chat_tones_export_and_keep_simulated_label(tmp_path):
     store = Store(tmp_path)
     chat = offline_sample(new_conversation(), 4)

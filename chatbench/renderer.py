@@ -135,7 +135,7 @@ body.wechat{background:#e0e0e0;color:#19191a;font-family:"Microsoft YaHei UI","M
 .wechat .bubble:before{content:"";position:absolute;top:13px;left:-5px;width:9px;height:9px;background:#eeeef0;transform:rotate(45deg)}
 .wechat .out .bubble:before{left:auto;right:-5px;background:#9df29f}
 .wechat .sender,.wechat .time,.wechat .text:empty{display:none}
-.wechat .text{font-size:14px;line-height:1.45;text-wrap:balance}
+.wechat .text{font-size:14px;line-height:1.45}
 .wechat .attachment{border-radius:4px;margin:1px 0 3px}
 .wechat .composer{height:52px;background:#f7f7f7;border-top:1px solid #e8e8e8;display:flex;align-items:center;gap:16px;padding:0 15px;color:#555;font-size:22px}
 .wechat .composer .entry{height:34px;flex:1;background:#fff;border:1px solid #ededed;border-radius:5px}
