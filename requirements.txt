@@ -6,3 +6,6 @@ python-dotenv>=1,<2
 pytest>=8,<10
 pypdf>=5,<7
 reportlab>=4,<5
+rapidocr>=3.10,<4
+onnxruntime>=1.31,<2
+opencv-python-headless>=4.8,<6

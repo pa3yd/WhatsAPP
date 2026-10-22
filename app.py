@@ -9,6 +9,7 @@ from datetime import date, datetime, time
 from zoneinfo import ZoneInfo
 
 import streamlit as st
+import pandas as pd
 
 from chatbench import exporter as chat_exporter, renderer as chat_renderer
 
@@ -21,9 +22,11 @@ from chatbench.generator import clone_for_batch, generate_ai, offline_sample, pi
 from chatbench import mail as mail_renderer
 from chatbench.mail import MAIL_WIDTH, MAX_MAIL_MESSAGES, new_mail_message, new_mail_record, validate_mail
 from chatbench.invoice_ui import render_invoice_page
+from chatbench.image_canvas import annotated_image, detect_regions, render_image_edit
 from chatbench.pi_reader import FIELD_LABELS, extract_pi
 from chatbench.models import keyword_warnings, new_conversation, new_group_member, new_message, normalize_positions, sender_options, validate_conversation
 from chatbench.renderer import render_header_preview_html, render_html
+from chatbench.screenshot_import import crop_avatar, extract_chat_draft, inspect_appearance
 from chatbench.storage import Store
 from chatbench.time_engine import assign_times, parse_manual, timeline_warnings
 
@@ -160,12 +163,13 @@ def preview(chat: dict, *, height: int | None = None) -> None:
 
 
 st.title("模拟聊天工作台")
-st.caption("人物、消息、邮件与 PI 均为模拟素材，仅供培训与演示；PI 导出带模拟标识。")
+st.caption("离线及 AI 生成内容仅供模拟演示；聊天截图导入的文字可能是真实记录，请核对后使用。PI 导出带模拟标识。")
 page = st.sidebar.radio("工作区", ["单组聊天与编辑", "PI 形式发票", "邮件记录截图", "批量生成", "历史与模板"], key="page")
 st.sidebar.caption(f"本地数据：{store.root}")
 
 if page == "单组聊天与编辑":
     left, right = st.columns([1.08, 1], gap="large")
+    draft_preview = None
     with left:
         st.subheader("场景与人物")
         data["title"] = st.text_input("标题", data["title"], key=f"{revision}-title")
@@ -222,6 +226,175 @@ if page == "单组聊天与编辑":
             if st.button("新增群成员", key=f"{revision}-add-group-member"):
                 group["members"].append(new_group_member())
                 reset_editor(data); st.rerun()
+        with st.expander("从真实聊天截图导入消息"):
+            st.caption("在本机识别 PNG、JPG 或 WebP 截图。识别文字和发送方只是草稿；原截图不会自动保存到聊天记录，也不会发给 AI。")
+            screenshot = st.file_uploader("上传聊天截图", type=["png", "jpg", "jpeg", "webp"], key="chat-screenshot-upload")
+            screenshot_hash = hashlib.sha256(screenshot.getvalue()).hexdigest() if screenshot else None
+            if screenshot:
+                st.image(screenshot, width=360)
+                retry_ocr = st.button("重新识别截图", key="recognize-chat-screenshot")
+                if screenshot_hash != st.session_state.get("screenshot_hash") or retry_ocr:
+                    st.session_state.screenshot_hash = screenshot_hash
+                    st.session_state.screenshot_draft = []
+                    st.session_state.pop("screenshot_appearance", None)
+                    try:
+                        with st.spinner("正在本机识别截图…"):
+                            candidates = extract_chat_draft(screenshot.getvalue())
+                            appearance = inspect_appearance(screenshot.getvalue())
+                        st.session_state.screenshot_draft = candidates
+                        st.session_state.screenshot_appearance = appearance
+                        if not candidates:
+                            st.warning("未识别到文字；请使用更清晰的截图，或在消息编辑器手动填写。")
+                    except Exception as exc:
+                        alert_error(exc)
+            candidates = st.session_state.get("screenshot_draft", [])
+            if screenshot_hash and screenshot_hash == st.session_state.get("screenshot_hash") and "screenshot_appearance" in st.session_state:
+                appearance = st.session_state.screenshot_appearance
+                st.markdown("**按原截图调整外观**")
+                st.caption("颜色和顶部名称为截图推测值，请对照左侧原图核对。头像可从原图裁剪；没有清晰头像时保持原头像。")
+                buyer_name = st.text_input("截图中对方名称", value=appearance["header_name"] or data["participants"]["buyer"]["name"], key=f"shot-buyer-name-{screenshot_hash}")
+                seller_name = st.text_input("截图中我方名称", value=data["participants"]["seller"]["name"], key=f"shot-seller-name-{screenshot_hash}")
+                palette_columns = st.columns(3)
+                background_color = palette_columns[0].color_picker("聊天背景", appearance["background"], key=f"shot-background-{screenshot_hash}")
+                incoming_color = palette_columns[1].color_picker("对方气泡", appearance["incoming"], key=f"shot-incoming-{screenshot_hash}")
+                outgoing_color = palette_columns[2].color_picker("我方气泡", appearance["outgoing"], key=f"shot-outgoing-{screenshot_hash}")
+                font_size = st.slider("聊天字体大小", 11, 22, appearance["font_size"], key=f"shot-font-{screenshot_hash}")
+                font_family = st.selectbox("聊天字体", ["系统字体", "微软雅黑", "Arial"], key=f"shot-font-family-{screenshot_hash}")
+                wallpaper_upload = st.file_uploader("纯净聊天背景图（可选）", type=["png", "jpg", "jpeg", "webp"], key=f"shot-wallpaper-{screenshot_hash}")
+                st.caption("原截图包含文字和气泡，不能直接用整张截图作背景；有无文字的原始背景图时可在这里上传。")
+                crop_values = {}
+                for person_id, title in (("buyer", "对方"), ("seller", "我方")):
+                    with st.expander(f"从截图裁剪{title}头像（可选）"):
+                        use_crop = st.checkbox(f"使用截图中的{title}头像", key=f"shot-crop-{person_id}-{screenshot_hash}")
+                        if use_crop:
+                            max_size = min(180, appearance["image_width"], appearance["image_height"])
+                            size = st.number_input("头像边长（像素）", min_value=8, max_value=max_size, value=min(40, max_size), key=f"shot-size-{person_id}-{screenshot_hash}")
+                            x = st.number_input("左上角 X", min_value=0, max_value=appearance["image_width"]-int(size), value=0, key=f"shot-x-{person_id}-{screenshot_hash}")
+                            y = st.number_input("左上角 Y", min_value=0, max_value=appearance["image_height"]-int(size), value=0, key=f"shot-y-{person_id}-{screenshot_hash}")
+                            crop_values[person_id] = crop_avatar(screenshot.getvalue(), int(x), int(y), int(size))
+                            st.image(crop_values[person_id], width=72)
+                people = sender_options(data)
+                sender_labels = {person_id: f"{person.get('name') or person_id}（{person_id}）" for person_id, person in people.items()}
+                choices = ["待判断"] + list(sender_labels.values())
+                rows = [{**item, "发送方": sender_labels.get(item["发送方"], "待判断")} for item in candidates]
+                st.caption("逐行核对文字与发送方；取消“导入”可排除标题、时间和误识别文字，也可在表格中增删行。")
+                edited = st.data_editor(pd.DataFrame(rows, columns=["导入", "发送方", "消息文本", "识别可信度"]), hide_index=True, num_rows="dynamic", use_container_width=True,
+                    column_config={
+                        "导入": st.column_config.CheckboxColumn("导入"),
+                        "发送方": st.column_config.SelectboxColumn("发送方", options=choices, required=True),
+                        "消息文本": st.column_config.TextColumn("消息文本", width="large"),
+                        "识别可信度": st.column_config.NumberColumn("识别可信度", disabled=True, format="%.2f"),
+                    }, key=f"screenshot-draft-{screenshot_hash}-{revision}")
+                draft_preview = copy.deepcopy(data)
+                draft_preview["messages"] = []
+                reverse_labels = {value: key for key, value in sender_labels.items()}
+                for row in edited.to_dict("records"):
+                    sender_id = reverse_labels.get(row.get("发送方"))
+                    message_text = row.get("消息文本")
+                    if row.get("导入") is True and sender_id and isinstance(message_text, str) and message_text.strip():
+                        draft_preview["messages"].append(new_message(sender_id, message_text.strip()))
+                draft_preview["participants"]["buyer"]["name"] = buyer_name.strip() or draft_preview["participants"]["buyer"]["name"]
+                draft_preview["participants"]["seller"]["name"] = seller_name.strip() or draft_preview["participants"]["seller"]["name"]
+                draft_preview["render_settings"]["screenshot_style"] = {"background": background_color,
+                    "incoming": incoming_color, "outgoing": outgoing_color, "font_size": font_size,
+                    "font_family": font_family}
+                draft_preview["render_settings"]["width"] = min(1000, max(420, int(appearance["image_width"])))
+                has_existing = any(str(message.get("text") or "").strip() or message.get("asset_id") for message in data["messages"])
+                action = st.radio("导入方式", ["追加到现有消息", "替换现有消息"], horizontal=True, key=f"screenshot-action-{revision}") if has_existing else "替换空白消息"
+                if has_existing and action == "替换现有消息":
+                    st.warning("导入后会替换当前消息。请先保存需要保留的版本。")
+                label = "替换现有消息并导入" if action == "替换现有消息" else "导入选中消息"
+                if st.button(label, key=f"apply-screenshot-{revision}"):
+                    try:
+                        reverse_labels = {value: key for key, value in sender_labels.items()}
+                        imported = []
+                        for row in edited.to_dict("records"):
+                            if row.get("导入") is not True:
+                                continue
+                            sender_id = reverse_labels.get(row.get("发送方"))
+                            message_text = row.get("消息文本")
+                            if not sender_id or not isinstance(message_text, str) or not message_text.strip():
+                                raise ValueError("选中的每行都需要有效的发送方和消息文本；请核对后重试。")
+                            message = new_message(sender_id, message_text.strip())
+                            message["source"] = "screenshot_ocr"
+                            message["locked"] = True
+                            imported.append(message)
+                        if not imported:
+                            raise ValueError("请至少选择一行有效消息。")
+                        keep = data["messages"] if action == "追加到现有消息" and has_existing else []
+                        if len(keep) + len(imported) > 100:
+                            raise ValueError("聊天最多保留 100 条消息，请减少导入行数。")
+                        data["participants"]["buyer"]["name"] = buyer_name.strip() or data["participants"]["buyer"]["name"]
+                        data["participants"]["seller"]["name"] = seller_name.strip() or data["participants"]["seller"]["name"]
+                        render_settings["screenshot_style"] = {"background": background_color,
+                            "incoming": incoming_color, "outgoing": outgoing_color, "font_size": font_size,
+                            "font_family": font_family}
+                        if wallpaper_upload:
+                            render_settings["screenshot_style"]["wallpaper_id"] = store.save_image(wallpaper_upload.getvalue())
+                        render_settings["width"] = min(1000, max(420, int(appearance["image_width"])))
+                        for person_id, avatar_bytes in crop_values.items():
+                            data["participants"][person_id]["avatar_id"] = store.save_image(avatar_bytes)
+                        data["messages"] = keep + imported
+                        normalize_positions(data)
+                        st.session_state.screenshot_draft = []
+                        st.session_state.pop("screenshot_appearance", None)
+                        reset_editor(data)
+                        st.rerun()
+                    except Exception as exc:
+                        alert_error(exc)
+                st.caption("识别图片不会保留原始消息时间；导入后可在下方编辑器逐条设置原始日期和时间。")
+        if render_settings.get("screenshot_style"):
+            with st.expander("调整已导入截图的外观"):
+                saved_style = render_settings["screenshot_style"]
+                saved_style["background"] = st.color_picker("背景色", saved_style["background"], key=f"{revision}-saved-background")
+                saved_style["incoming"] = st.color_picker("对方气泡色", saved_style["incoming"], key=f"{revision}-saved-incoming")
+                saved_style["outgoing"] = st.color_picker("我方气泡色", saved_style["outgoing"], key=f"{revision}-saved-outgoing")
+                saved_style["font_size"] = st.slider("字体大小", 11, 22, int(saved_style["font_size"]), key=f"{revision}-saved-font")
+                saved_style["font_family"] = st.selectbox("字体", ["系统字体", "微软雅黑", "Arial"],
+                    index=["系统字体", "微软雅黑", "Arial"].index(saved_style.get("font_family", "系统字体")), key=f"{revision}-saved-font-family")
+                st.caption("修改后右侧预览会更新；保存聊天后，这些样式也会保留在记录中。")
+        with st.expander("直接在原图上编辑文字与生成效果图"):
+            st.caption("此模式保留原截图的名称、头像和背景像素。可改写识别出的文字、删掉文字区域，或在指定位置增加文字；生成图仅供核对和下载，不会改动原文件。")
+            canvas_upload = st.file_uploader("上传要直接编辑的原图", type=["png", "jpg", "jpeg", "webp"], key="canvas-upload")
+            canvas_source = canvas_upload or screenshot
+            if screenshot and not canvas_upload:
+                st.caption("已沿用上方上传的聊天截图。")
+            if canvas_source:
+                raw_canvas = canvas_source.getvalue()
+                canvas_hash = hashlib.sha256(raw_canvas).hexdigest()
+                if canvas_hash != st.session_state.get("canvas_hash"):
+                    st.session_state.canvas_hash = canvas_hash
+                    try:
+                        with st.spinner("正在定位原图中的文字…"):
+                            st.session_state.canvas_regions = detect_regions(raw_canvas)
+                    except Exception as exc:
+                        st.session_state.canvas_regions = []
+                        alert_error(exc)
+                regions = st.session_state.get("canvas_regions", [])
+                if st.checkbox("显示原图文字区域编号", key="canvas-show-boxes") and regions:
+                    st.image(annotated_image(raw_canvas, regions), use_container_width=True)
+                else:
+                    st.image(raw_canvas, use_container_width=True)
+                st.caption("表格中把“操作”改为修改或删除；删掉整行也会尝试移除对应区域。新增时填写内容、X、Y、宽、高，并把操作选为新增。坐标单位是原图像素。")
+                canvas_rows = st.data_editor(pd.DataFrame(regions, columns=["编号", "操作", "内容", "X", "Y", "宽", "高", "方向", "可信度"]),
+                    hide_index=True, num_rows="dynamic", use_container_width=True,
+                    column_config={
+                        "编号": st.column_config.NumberColumn("编号", disabled=True),
+                        "操作": st.column_config.SelectboxColumn("操作", options=["保留", "修改", "删除", "新增"], required=True),
+                        "内容": st.column_config.TextColumn("内容", width="large"),
+                        "X": st.column_config.NumberColumn("X"), "Y": st.column_config.NumberColumn("Y"),
+                        "宽": st.column_config.NumberColumn("宽"), "高": st.column_config.NumberColumn("高"),
+                        "方向": st.column_config.SelectboxColumn("方向", options=["左", "右"]),
+                        "可信度": st.column_config.NumberColumn("可信度", disabled=True, format="%.2f"),
+                    }, key=f"canvas-editor-{canvas_hash}")
+                try:
+                    canvas_png = render_image_edit(raw_canvas, regions, canvas_rows.to_dict("records"))
+                    st.markdown("**原图编辑效果预览**")
+                    st.image(canvas_png, use_container_width=True)
+                    st.download_button("下载原图编辑效果 PNG", canvas_png, file_name="edited_chat_screenshot.png", mime="image/png", key=f"canvas-download-{canvas_hash}")
+                except Exception as exc:
+                    alert_error(exc)
+                st.caption("原图中的日期、头像和背景会保留；删除区域的背景由图像修复估算，复杂花纹可能留下痕迹。加字需留出足够空间，避免遮挡其他气泡。")
         if render_settings["style"] == "web":
             render_settings["tone"] = st.selectbox("宽屏色调", ["warm", "neutral"],
                 index=["warm", "neutral"].index(render_settings.get("tone", "warm")),
@@ -515,18 +688,21 @@ if page == "单组聊天与编辑":
                 except Exception as exc:
                     alert_error(exc)
     with preview_slot.container():
-        filled_count = sum(bool(str(msg.get("text") or "").strip()) for msg in data["messages"])
-        st.caption(f"当前 {len(data['messages'])} 条消息，其中 {filled_count} 条有文字。")
+        shown_chat = draft_preview if draft_preview and draft_preview["messages"] else data
+        filled_count = sum(bool(str(msg.get("text") or "").strip()) for msg in shown_chat["messages"])
+        if shown_chat is draft_preview:
+            st.info("截图草稿预览：文字和样式尚未写入当前聊天。请核对左侧表格并点击“导入选中消息”。")
+        st.caption(f"当前预览 {len(shown_chat['messages'])} 条消息，其中 {filled_count} 条有文字。")
         if not filled_count:
-            st.info("当前都是空白消息。请选择“离线示例”并点击“创建/重新生成整组”，或在下方消息编辑器手动填写。")
+            st.info("暂无可预览的文字。上传截图后将自动识别；也可以在左侧表格新增消息。")
         if wide_preview_slot is None:
-            preview(data)
+            preview(shown_chat)
         else:
             st.caption("宽屏完整预览显示在编辑区上方。")
     if wide_preview_slot is not None:
         with wide_preview_slot.container():
             st.subheader("宽屏完整预览")
-            preview(data, height=800)
+            preview(shown_chat, height=800)
     with warnings_slot.container():
         try:
             for warning in keyword_warnings(data) + timeline_warnings(data):

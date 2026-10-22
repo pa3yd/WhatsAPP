@@ -131,7 +131,9 @@ def render_html(data: dict, store: Store) -> str:
         message_avatar = (f'<img class="message-avatar" src="{sender_avatar}" alt="虚构头像">'
                           if sender_avatar else f'<span class="message-avatar placeholder">{sender_initial}</span>') if style == "wechat" or (is_group and style == "classic" and side == "in") else ""
         read_mark = '<span class="read-mark" aria-hidden="true">✓✓</span>' if style == "classic" and side == "out" else ""
-        content = f'{attachment}<div class="text">{message}</div><div class="time">{escape(clock)}{read_mark}</div>'
+        time_html = (f'<div class="time">{escape(clock)}{read_mark}</div>'
+                     if raw_time or msg.get("source") != "screenshot_ocr" else "")
+        content = f'{attachment}<div class="text">{message}</div>{time_html}'
         if style == "wechat" and is_group:
             nickname = f'<div class="sender">{name}</div>' if side == "in" else ""
             body.append(f'<div class="row {side}">{message_avatar}<div class="message-content">{nickname}<div class="bubble">{content}</div></div></div>')
@@ -212,6 +214,31 @@ body.web{{font-family:"Segoe UI","Helvetica Neue",Arial,"Microsoft YaHei",sans-s
 .web .bubble{{padding:7px 9px 5px}}
 .classic .chat{{background-image:url("{WALLPAPER_DATA_URI}")}}
 '''
+    screenshot_style = data.get("render_settings", {}).get("screenshot_style") or {}
+    custom_css = ""
+    if screenshot_style:
+        def valid_color(value: object, fallback: str) -> str:
+            return value if isinstance(value, str) and re.fullmatch(r"#[0-9a-fA-F]{6}", value) else fallback
+
+        background = valid_color(screenshot_style.get("background"), "#f8f4ee")
+        incoming = valid_color(screenshot_style.get("incoming"), "#ffffff")
+        outgoing = valid_color(screenshot_style.get("outgoing"), "#d9fdd3")
+        font_size = screenshot_style.get("font_size", 14)
+        font_size = font_size if type(font_size) is int and 11 <= font_size <= 22 else 14
+        custom_css = f'''.chat,.web .chat,.web.neutral .chat,.classic .chat,.wechat .chat{{background-color:{background};background-image:none}}
+.bubble,.web .bubble,.classic .bubble,.wechat .bubble{{background:{incoming}}}
+.out .bubble,.web .out .bubble,.classic .out .bubble,.wechat .out .bubble{{background:{outgoing}}}
+.bubble:before,.classic .bubble:before,.wechat .bubble:before{{background:{incoming}}}
+.out .bubble:before,.classic .out .bubble:before,.wechat .out .bubble:before{{background:{outgoing}}}
+.text,.web .text,.classic .text,.wechat .text{{font-size:{font_size}px}}'''
+        font_family = {"微软雅黑": '"Microsoft YaHei","PingFang SC",sans-serif',
+                       "Arial": 'Arial,"Helvetica Neue",sans-serif'}.get(screenshot_style.get("font_family"))
+        if font_family:
+            custom_css += f'''.frame,.text{{font-family:{font_family}}}'''
+        wallpaper_id = screenshot_style.get("wallpaper_id")
+        if wallpaper_id:
+            wallpaper = _image(store, wallpaper_id)
+            custom_css += f'''.chat,.web .chat,.web.neutral .chat,.classic .chat,.wechat .chat{{background-image:url("{wallpaper}");background-size:cover;background-position:center}}'''
     video_icon = '<svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><rect x="2" y="6" width="14" height="12" rx="2"/><path d="m16 10 6-4v12l-6-4"/></svg>'
     phone_icon = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h4l1 5-2 2a15 15 0 0 0 5 5l2-2 5 1v4a3 3 0 0 1-3 3C10 21 3 14 3 6a3 3 0 0 1 3-3Z"/></svg>'
     mic_icon = '<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="9" y="2" width="6" height="13" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v4m-4 0h8"/></svg>'
@@ -224,7 +251,8 @@ body.web{{font-family:"Segoe UI","Helvetica Neue",Arial,"Microsoft YaHei",sans-s
                 else '<div class="composer" aria-hidden="true"><span>☰</span><div class="entry"></div><span>☺</span><span>＋</span></div>' if style == "wechat"
                 else f'<div class="composer" aria-hidden="true"><span>＋</span><div class="entry"></div><span>☺</span><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M4 7h4l2-2h4l2 2h4v12H4z"/><circle cx="12" cy="13" r="3.5"/></svg><span class="mic">{mic_icon}</span></div>')
     last_timestamp = next((m.get("timestamp") for m in reversed(data["messages"]) if m.get("timestamp")), None)
-    device_clock = datetime.fromisoformat(last_timestamp).astimezone(ZoneInfo(data["timezone"])).strftime("%H:%M") if last_timestamp else "09:41"
+    device_clock = (datetime.fromisoformat(last_timestamp).astimezone(ZoneInfo(data["timezone"])).strftime("%H:%M") if last_timestamp
+                    else "--:--" if any(msg.get("source") == "screenshot_ocr" for msg in data["messages"]) else "09:41")
     status_icons = '<svg width="18" height="14" viewBox="0 0 18 14" fill="currentColor"><rect x="1" y="9" width="3" height="4" rx="1"/><rect x="6" y="6" width="3" height="7" rx="1"/><rect x="11" y="3" width="3" height="10" rx="1"/></svg><svg width="18" height="14" viewBox="0 0 18 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M1 5c4-4 12-4 16 0M4 8c3-3 7-3 10 0M8 11c1-1 2-1 3 0"/></svg><svg width="23" height="13" viewBox="0 0 23 13" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1" y="1" width="18" height="11" rx="2"/><rect x="3" y="3" width="13" height="7" rx="1" fill="currentColor" stroke="none"/><path d="M21 5v3"/></svg>'
     status_bar = f'<div class="status-bar"><span>{escape(device_clock)}</span><span class="status-icons">{status_icons}</span></div>' if style == "classic" else ""
     back_arrow = '<span class="back" aria-hidden="true">‹</span>' if style == "classic" else ""
@@ -242,4 +270,5 @@ body.web{{font-family:"Segoe UI","Helvetica Neue",Arial,"Microsoft YaHei",sans-s
 {web_css}
 {classic_css}
 {realism_css}
+{custom_css}
 </style></head><body class="{style} {tone}{' group' if is_group else ''}"><div class="frame">{status_bar}<header class="top">{back_arrow}{header_avatar}<div class="head-main"><strong>{escape(str(header_name or 'Group'))}</strong>{header_status}</div>{toolbar}</header><main class="chat">{''.join(body)}</main>{composer}{home_indicator}</div></body></html>'''
