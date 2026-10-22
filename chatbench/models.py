@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 SCHEMA_VERSION = 2
 SENDER_IDS = ("buyer", "seller")
-MESSAGE_TYPES = ("text", "image", "image_text")
+MESSAGE_TYPES = ("text", "image", "image_text", "call")
 
 
 def uid() -> str:
@@ -21,6 +21,23 @@ def new_message(sender: str = "buyer", text: str = "", *, timestamp: str | None 
     return {"id": uid(), "sender_id": sender, "text": text, "type": "text",
             "timestamp": timestamp, "asset_id": None, "manual_time": False, "locked": False,
             "source": "manual", "position": 0}
+
+
+def call_label(message: dict) -> str:
+    duration = message.get("call_duration_seconds", 0)
+    minutes, seconds = divmod(duration, 60)
+    hours, minutes = divmod(minutes, 60)
+    clock = f"{hours}:{minutes:02d}:{seconds:02d}" if hours else f"{minutes:02d}:{seconds:02d}"
+    return f"通话时长 {clock}"
+
+
+def new_call_message(sender: str = "seller", *, timestamp: str | None = None,
+                     duration_seconds: int = 1251) -> dict:
+    message = new_message(sender, timestamp=timestamp)
+    message.update(type="call", call_duration_seconds=duration_seconds, manual_time=True,
+                   locked=True, show_time_label=True)
+    message["text"] = call_label(message)
+    return message
 
 
 def new_group_member(name: str = "新成员") -> dict:
@@ -78,6 +95,8 @@ def validate_conversation(data: dict) -> dict:
     time_gap = settings.get("wechat_time_gap_minutes", 5)
     if type(time_gap) is not int or not 1 <= time_gap <= 60:
         raise ValueError("微信时间标签间隔必须为 1–60 分钟的整数。")
+    if settings.get("wechat_date_format", "relative") not in ("relative", "full"):
+        raise ValueError("微信时间标签格式无效。")
     pi = data.get("pi")
     if pi is not None and (not isinstance(pi, dict) or not isinstance(pi.get("fields"), dict)
                            or any(not isinstance(key, str) or not isinstance(value, str)
@@ -146,6 +165,10 @@ def validate_conversation(data: dict) -> dict:
             raise ValueError(f"第 {i} 条消息发送方或类型无效。")
         if msg.get("type") in ("image", "image_text") and not msg.get("asset_id"):
             raise ValueError(f"第 {i} 条图片消息缺少图片资源。")
+        if msg.get("type") == "call":
+            duration = msg.get("call_duration_seconds")
+            if type(duration) is not int or not 0 <= duration <= 359999:
+                raise ValueError(f"第 {i} 条通话时长必须为 0–99:59:59 范围内的秒数。")
         if msg.get("timestamp"):
             try:
                 instant = datetime.fromisoformat(msg["timestamp"])

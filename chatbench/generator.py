@@ -157,6 +157,8 @@ def regenerate_one(data: dict, message_id: str) -> None:
     if index is None:
         raise ValueError("消息不存在。")
     old = data["messages"][index]
+    if old.get("type") == "call":
+        raise ValueError("通话记录请手动编辑发生时间和时长。")
     if old.get("locked"):
         raise ValueError("该消息已锁定。")
     context = [{"sender_id": m["sender_id"], "text": m["text"]} for m in data["messages"][max(0, index - 3): index + 4]]

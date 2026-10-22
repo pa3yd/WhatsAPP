@@ -7,12 +7,15 @@ from html import escape
 from zoneinfo import ZoneInfo
 
 from .storage import Store
-from .models import sender_options
+from .models import call_label, sender_options
 from .wallpaper import WALLPAPER_DATA_URI
 
 
-def _wechat_time_label(moment: datetime, conversation_day: str) -> str:
+def _wechat_time_label(moment: datetime, conversation_day: str, date_format: str = "relative") -> str:
     reference = date.fromisoformat(conversation_day)
+    if date_format == "full":
+        year = f"{moment.year}年" if moment.year != reference.year else ""
+        return f"{year}{moment.month}月{moment.day}日 星期{'一二三四五六日'[moment.weekday()]} {moment:%H:%M}"
     if moment.date() == reference:
         return moment.strftime("%H:%M")
     if moment.date() == reference - timedelta(days=1):
@@ -97,7 +100,8 @@ def render_html(data: dict, store: Store) -> str:
     previous_day = None
     previous_visible_moment = None
     for msg in data["messages"]:
-        if style == "wechat" and not str(msg.get("text") or "").strip() and not msg.get("asset_id"):
+        is_call = msg.get("type") == "call"
+        if style == "wechat" and not is_call and not str(msg.get("text") or "").strip() and not msg.get("asset_id"):
             continue
         raw_time = msg.get("timestamp")
         if raw_time:
@@ -109,7 +113,7 @@ def render_html(data: dict, store: Store) -> str:
                 long_gap = (previous_visible_moment is not None
                             and moment.timestamp() - previous_visible_moment.timestamp() >= time_gap_minutes * 60)
                 if previous_visible_moment is None or new_day or long_gap or msg.get("show_time_label", False):
-                    label = _wechat_time_label(moment, data["conversation_date"])
+                    label = _wechat_time_label(moment, data["conversation_date"], data.get("render_settings", {}).get("wechat_date_format", "relative"))
                     body.append(f'<div class="day">{escape(label)}</div>')
             elif day != previous_day:
                 body.append(f'<div class="day">{escape(day)}</div>')
@@ -122,7 +126,7 @@ def render_html(data: dict, store: Store) -> str:
         person = people[msg["sender_id"]]
         name = escape(str(person.get("name") or msg["sender_id"]))
         attachment = ""
-        if msg.get("asset_id"):
+        if msg.get("asset_id") and not is_call:
             src = _image(store, msg["asset_id"])
             attachment = f'<img class="attachment" src="{src}" alt="模拟产品图片">'
         message = escape(str(msg.get("text") or "").strip() if style == "wechat" else str(msg.get("text") or ""))
@@ -134,6 +138,9 @@ def render_html(data: dict, store: Store) -> str:
         time_html = (f'<div class="time">{escape(clock)}{read_mark}</div>'
                      if raw_time or msg.get("source") != "screenshot_ocr" else "")
         content = f'{attachment}<div class="text">{message}</div>{time_html}'
+        if is_call:
+            handset = '<svg class="call-icon" viewBox="0 0 24 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 13c-2-1-1-4 1-6 4-4 12-4 16 0 2 2 3 5 1 6l-4-1V9c-3-2-7-2-10 0v3Z"/></svg>'
+            content = f'<div class="call-content"><span>{escape(call_label(msg))}</span>{handset}</div>{time_html}'
         if style == "wechat" and is_group:
             nickname = f'<div class="sender">{name}</div>' if side == "in" else ""
             body.append(f'<div class="row {side}">{message_avatar}<div class="message-content">{nickname}<div class="bubble">{content}</div></div></div>')
@@ -159,6 +166,10 @@ body.wechat{background:#e0e0e0;color:#19191a;font-family:"Microsoft YaHei UI","M
 .wechat .sender,.wechat .time,.wechat .text:empty{display:none}
 .wechat .text{font-size:14px;line-height:1.45;text-wrap:wrap}
 .wechat .attachment{border-radius:4px;margin:1px 0 3px}
+.call-content{display:flex;align-items:center;gap:9px;font-size:14px;line-height:1.45;white-space:nowrap}
+.call-icon{width:22px;height:19px;flex:0 0 22px}
+.wechat .call-content{font-family:inherit;font-weight:400;color:#19191a}
+.wechat .in .call-content{flex-direction:row-reverse}
 .wechat .composer{height:52px;background:#f7f7f7;border-top:1px solid #e8e8e8;display:flex;align-items:center;gap:16px;padding:0 15px;color:#555;font-size:22px}
 .wechat .composer .entry{height:34px;flex:1;background:#fff;border:1px solid #ededed;border-radius:5px}
 .wechat.group .row{margin:18px 0 20px}

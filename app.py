@@ -11,9 +11,10 @@ from zoneinfo import ZoneInfo
 import streamlit as st
 import pandas as pd
 
-from chatbench import exporter as chat_exporter, renderer as chat_renderer
+from chatbench import models as chat_models, exporter as chat_exporter, renderer as chat_renderer
 
 # Refresh the stateless render/export modules together when Streamlit reruns.
+importlib.reload(chat_models)
 importlib.reload(chat_renderer)
 importlib.reload(chat_exporter)
 
@@ -24,7 +25,7 @@ from chatbench.mail import MAIL_WIDTH, MAX_MAIL_MESSAGES, new_mail_message, new_
 from chatbench.invoice_ui import render_invoice_page
 from chatbench.image_canvas import annotated_image, detect_regions, render_image_edit
 from chatbench.pi_reader import FIELD_LABELS, extract_pi
-from chatbench.models import keyword_warnings, new_conversation, new_group_member, new_message, normalize_positions, sender_options, validate_conversation
+from chatbench.models import call_label, keyword_warnings, new_call_message, new_conversation, new_group_member, new_message, normalize_positions, sender_options, validate_conversation
 from chatbench.renderer import render_header_preview_html, render_html
 from chatbench.screenshot_import import crop_avatar, extract_chat_draft, inspect_appearance
 from chatbench.storage import Store
@@ -406,6 +407,12 @@ if page == "单组聊天与编辑":
                 value=render_settings.get("wechat_time_gap_minutes", 5),
                 key=f"{revision}-wechat-time-gap",
             ))
+            date_formats = ["full", "relative"]
+            render_settings["wechat_date_format"] = st.selectbox(
+                "微信时间标签格式", date_formats,
+                index=date_formats.index(render_settings.get("wechat_date_format", "full")),
+                format_func=lambda value: {"full": "日期、星期与时间（参考图样式）", "relative": "当天只显示时间"}[value],
+                key=f"{revision}-wechat-date-format")
             st.caption("首条消息、跨日及相邻消息间隔达到设定值时，居中显示时间。也可在单条消息中指定显示；消息的实际时间在下方时间轴编辑。")
         data["allow_details"] = st.checkbox("允许 AI 补充合理细节", data["allow_details"], key=f"{revision}-details")
         st.subheader("聊天头像")
@@ -617,6 +624,33 @@ if page == "单组聊天与编辑":
     st.divider()
     st.subheader("消息编辑器与时间轴")
     st.caption("调整顺序保留原时间；时间冲突由提醒指出。每条人工时间和锁定消息不会被自动重算覆盖。")
+    if render_settings["style"] == "wechat":
+        with st.expander("添加微信语音通话", expanded=False):
+            call_people = sender_options(data)
+            call_sender = st.selectbox("通话记录显示方", list(call_people), index=list(call_people).index("seller"),
+                format_func=lambda value: call_people[value].get("name") or value, key=f"{revision}-add-call-sender")
+            latest_stamp = next((item.get("timestamp") for item in reversed(data["messages"]) if item.get("timestamp")), None)
+            call_default = (datetime.fromisoformat(latest_stamp).astimezone(display_zone) if latest_stamp
+                            else datetime.fromisoformat(data["conversation_date"] + "T09:00:00"))
+            cd, ct = st.columns(2)
+            call_day = cd.date_input("通话发生日期", call_default.date(), key=f"{revision}-add-call-day")
+            call_time = ct.time_input("通话发生时间", call_default.time().replace(second=0, microsecond=0), step=60, key=f"{revision}-add-call-time")
+            ch, cm, cs = st.columns(3)
+            call_hours = int(ch.number_input("通话时长：小时", min_value=0, max_value=99, value=0, key=f"{revision}-add-call-hours"))
+            call_minutes = int(cm.number_input("通话时长：分钟", min_value=0, max_value=59, value=20, key=f"{revision}-add-call-minutes"))
+            call_seconds = int(cs.number_input("通话时长：秒", min_value=0, max_value=59, value=51, key=f"{revision}-add-call-seconds"))
+            call_after = st.selectbox("通话记录插入位置", [-1] + list(range(len(data["messages"]))),
+                index=len(data["messages"]), format_func=lambda value: "聊天最前面" if value == -1 else f"第 {value + 1} 条消息后", key=f"{revision}-add-call-after")
+            if st.button("插入通话记录", key=f"{revision}-insert-call"):
+                try:
+                    record = new_call_message(call_sender, timestamp=parse_manual(call_day, call_time, data["timezone"]),
+                                              duration_seconds=call_hours * 3600 + call_minutes * 60 + call_seconds)
+                    data["messages"].insert(call_after + 1, record)
+                    normalize_positions(data)
+                    reset_editor(data)
+                    st.rerun()
+                except Exception as exc:
+                    alert_error(exc)
     for index, msg in enumerate(data["messages"]):
         stamp = msg.get("timestamp")
         display_stamp = datetime.fromisoformat(stamp).astimezone(display_zone).isoformat(timespec="minutes") if stamp else None
@@ -624,7 +658,7 @@ if page == "单组聊天与编辑":
         gap = ""
         if stamp and previous:
             gap = f" · 间隔 {(datetime.fromisoformat(stamp) - datetime.fromisoformat(previous)).total_seconds()/60:g} 分钟"
-        summary = (msg.get("text") or "（空消息）").replace("\n", " ")[:42]
+        summary = (call_label(msg) if msg.get("type") == "call" else msg.get("text") or "（空消息）").replace("\n", " ")[:42]
         badge = "📎" if msg.get("asset_id") else ""
         with st.expander(f"{index+1:02d} · {msg['sender_id']} · {display_stamp or '未设置时间'}{gap} · {summary} {badge}"):
             key = f"{revision}-{msg['id']}"
@@ -637,10 +671,28 @@ if page == "单组聊天与编辑":
             msg["sender_id"] = st.selectbox("发送方", sender_ids, index=sender_ids.index(msg["sender_id"]) if msg["sender_id"] in people else 0,
                 format_func=lambda person_id: people[person_id].get("name") or person_id,
                 key=key+"-sender", on_change=lambda m=msg, k=key+"-sender": m.update(sender_id=st.session_state[k]))
+            if render_settings["style"] == "wechat" or msg.get("type") == "call":
+                selected_kind = st.selectbox("消息内容类型", ["message", "call"], index=1 if msg.get("type") == "call" else 0,
+                    format_func=lambda value: {"message": "文字或图片消息", "call": "微信语音通话"}[value], key=key+"-kind")
+                if selected_kind == "call":
+                    msg["type"] = "call"
+                    duration = msg.setdefault("call_duration_seconds", 1251)
+                    ch, cm, cs = st.columns(3)
+                    hours = int(ch.number_input("时长：小时", min_value=0, max_value=99, value=duration // 3600, key=key+"-call-hours"))
+                    minutes = int(cm.number_input("时长：分钟", min_value=0, max_value=59, value=(duration % 3600) // 60, key=key+"-call-minutes"))
+                    seconds = int(cs.number_input("时长：秒", min_value=0, max_value=59, value=duration % 60, key=key+"-call-seconds"))
+                    msg["call_duration_seconds"] = hours * 3600 + minutes * 60 + seconds
+                    msg["text"] = call_label(msg)
+                    st.caption(call_label(msg))
+                elif msg.get("type") == "call":
+                    msg["type"] = "image_text" if msg.get("asset_id") and msg.get("text") else "image" if msg.get("asset_id") else "text"
+            is_call = msg.get("type") == "call"
             def sync_text(m=msg, k=key+"-text"):
                 m["text"] = st.session_state[k]
-                m["type"] = "image_text" if m.get("asset_id") and m["text"] else "image" if m.get("asset_id") else "text"
-            msg["text"] = st.text_area("消息文本", msg.get("text", ""), key=key+"-text", on_change=sync_text)
+                if m.get("type") != "call":
+                    m["type"] = "image_text" if m.get("asset_id") and m["text"] else "image" if m.get("asset_id") else "text"
+            if not is_call:
+                msg["text"] = st.text_area("消息文本", msg.get("text", ""), key=key+"-text", on_change=sync_text)
             msg["locked"] = st.checkbox("锁定，不允许 AI 修改", bool(msg.get("locked")), key=key+"-lock", on_change=lambda m=msg, k=key+"-lock": m.update(locked=st.session_state[k]))
             choices = ["无图片"] + [f"图片 {i+1} · {asset[:8]}" for i, asset in enumerate(product["image_ids"])]
             current_asset = msg.get("asset_id")
@@ -649,10 +701,11 @@ if page == "单组聊天与编辑":
                 choice = st.session_state[k]
                 m["asset_id"] = product["image_ids"][choice-1] if choice else None
                 m["type"] = "image_text" if m["asset_id"] and m["text"] else "image" if m["asset_id"] else "text"
-            image_index = st.selectbox("图片附件", range(len(choices)), index=selected, format_func=lambda i: choices[i], key=key+"-asset", on_change=sync_asset)
-            msg["asset_id"] = product["image_ids"][image_index-1] if image_index else None
-            msg["type"] = "image_text" if msg["asset_id"] and msg["text"] else "image" if msg["asset_id"] else "text"
-            if msg["asset_id"]:
+            image_index = st.selectbox("图片附件", range(len(choices)), index=selected, format_func=lambda i: choices[i], key=key+"-asset", on_change=sync_asset, disabled=is_call)
+            if not is_call:
+                msg["asset_id"] = product["image_ids"][image_index-1] if image_index else None
+                msg["type"] = "image_text" if msg["asset_id"] and msg["text"] else "image" if msg["asset_id"] else "text"
+            if msg["asset_id"] and not is_call:
                 st.image(str(store.image_path(msg["asset_id"])), width=180)
             local = datetime.fromisoformat(stamp).astimezone(display_zone) if stamp else datetime.fromisoformat(data["conversation_date"]+"T09:00:00")
             mc1, mc2, mc3 = st.columns([1, 1, 1])
@@ -682,7 +735,7 @@ if page == "单组聊天与编辑":
                 data["messages"].insert(index+1, new_message(msg["sender_id"])); normalize_positions(data); reset_editor(data); st.rerun()
             if actions[4].button("删除", key=key+"-delete"):
                 data["messages"].pop(index); normalize_positions(data); reset_editor(data); st.rerun()
-            if actions[5].button("AI 重写", key=key+"-regen", disabled=msg.get("locked", False)):
+            if actions[5].button("AI 重写", key=key+"-regen", disabled=msg.get("locked", False) or is_call):
                 try:
                     regenerate_one(data, msg["id"]); reset_editor(data); st.rerun()
                 except Exception as exc:
